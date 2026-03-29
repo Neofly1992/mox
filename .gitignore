@@ -1,3 +1,11 @@
+# Swift
+.build/
+Packages/
+*.xcuserstate
+*.xcworkspace
+!*.xcworkspacedata
+DerivedData/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

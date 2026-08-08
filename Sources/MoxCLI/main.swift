@@ -153,10 +153,12 @@ struct MoxCLI {
     }
     
     static func handleRun(args: [String]) async throws {
+        let config = (try? ConfigManager.shared.load()) ?? AppConfig()
         var modelId: String?
-        var port: Int = 8080
-        var host: String = "127.0.0.1"
-        
+        var port: Int = config.server.port
+        var host: String = config.server.host
+        var hostOverridden = false
+        var portOverridden = false
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -164,11 +166,13 @@ struct MoxCLI {
                 i += 1
                 if i < args.count, let p = Int(args[i]) {
                     port = p
+                    portOverridden = true
                 }
             case "--host":
                 i += 1
                 if i < args.count {
                     host = args[i]
+                    hostOverridden = true
                 }
             default:
                 if modelId == nil {
@@ -177,7 +181,9 @@ struct MoxCLI {
             }
             i += 1
         }
-        
+        // CLI override flags are tracked so future revisions can warn when
+        // they diverge from values persisted in `~/.mox/config.json`.
+        _ = (hostOverridden, portOverridden)
         guard let id = modelId else {
             print("Error: Model ID required")
             print("Usage: mox run <model-id> [--port 8080]")

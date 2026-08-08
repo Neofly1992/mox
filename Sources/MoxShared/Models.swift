@@ -4,6 +4,10 @@ public enum ModelSource: String, Codable, Sendable, CaseIterable {
     case huggingface = "huggingface"
     case modelscope = "modelscope"
     case mlxCommunity = "mlx-community"
+    /// Sentinel for model directories that pre-date the manifest format. They
+    /// have no trustworthy source attribution and should not be confused with
+    /// a real provider.
+    case unknown = "unknown"
 }
 
 public struct ModelInfo: Codable, Identifiable, Sendable {
@@ -26,8 +30,27 @@ public struct ModelInfo: Codable, Identifiable, Sendable {
     public var sizeDescription: String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useGB, .useMB]
-        formatter.countStyle = .file
+        formatter.countStyle = .binary
         return formatter.string(fromByteCount: size)
+    }
+}
+
+/// On-disk manifest written to each model directory under `mox.json` after a
+/// successful pull. Records the canonical model id, the source, the originally
+/// requested id, and the install timestamp. The manifest is the source of
+/// truth for `source` so that callers never have to reverse-engineer it from
+/// the directory name.
+public struct ModelManifest: Codable, Sendable {
+    public var id: String
+    public var source: ModelSource
+    public var originalId: String
+    public var installedAt: Date
+
+    public init(id: String, source: ModelSource, originalId: String, installedAt: Date = Date()) {
+        self.id = id
+        self.source = source
+        self.originalId = originalId
+        self.installedAt = installedAt
     }
 }
 
@@ -169,44 +192,95 @@ public protocol ModelSourceResolver: Sendable {
     var name: String { get }
     func resolveModelId(_ id: String) -> String
     func downloadURL(for modelId: String) -> URL?
+    /// Validate that any configured mirror host is on this source's allowlist.
+    /// Throws `MirrorError.invalidMirror` if a mirror is set to a non-allowed host.
+    func validateMirror() throws
+}
+
+/// Error raised when a configured mirror host is not on the source's allowlist.
+/// Lives in `MoxShared` (rather than `ModelError` in `MoxCore`) so the resolver
+/// protocol can throw it without a back-dependency.
+public enum MirrorError: Error, LocalizedError {
+    case invalidMirror(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidMirror(let mirror):
+            return "Mirror host not on allowlist: '\(mirror)'"
+        }
+    }
+}
+
+/// Hard-coded host allowlist for HuggingFace mirrors. Only well-known,
+/// first-party mirrors are accepted; arbitrary hosts must NOT be silently
+/// trusted.
+public enum HuggingFaceMirrorPolicy {
+    public static let allowedHosts: Set<String> = ["huggingface.co", "hf-mirror.com"]
+}
+
+/// Hard-coded host allowlist for ModelScope mirrors.
+public enum ModelScopeMirrorPolicy {
+    public static let allowedHosts: Set<String> = ["modelscope.cn"]
 }
 
 public struct HuggingFaceSource: ModelSourceResolver, Sendable {
     public let name = "huggingface"
     public let mirror: String?
-    
-    public init(mirror: String? = nil) {
+
+    public init(mirror: String? = nil) throws {
         self.mirror = mirror
+        try validateMirror()
     }
-    
+
     public func resolveModelId(_ id: String) -> String {
         if id.contains("/") {
             return id
         }
         return "mlx-community/\(id)"
     }
-    
+
     public func downloadURL(for modelId: String) -> URL? {
         let base = mirror ?? "https://huggingface.co"
         return URL(string: "\(base)/\(modelId)")
+    }
+
+    public func validateMirror() throws {
+        guard let mirror else { return }
+        guard let host = URL(string: mirror)?.host?.lowercased() else {
+            throw MirrorError.invalidMirror(mirror)
+        }
+        if !HuggingFaceMirrorPolicy.allowedHosts.contains(host) {
+            throw MirrorError.invalidMirror(mirror)
+        }
     }
 }
 
 public struct ModelScopeSource: ModelSourceResolver, Sendable {
     public let name = "modelscope"
     public let mirror: String?
-    
-    public init(mirror: String? = nil) {
+
+    public init(mirror: String? = nil) throws {
         self.mirror = mirror
+        try validateMirror()
     }
-    
+
     public func resolveModelId(_ id: String) -> String {
         return id
     }
-    
+
     public func downloadURL(for modelId: String) -> URL? {
         let base = mirror ?? "https://modelscope.cn"
         return URL(string: "\(base)/\(modelId)")
+    }
+
+    public func validateMirror() throws {
+        guard let mirror else { return }
+        guard let host = URL(string: mirror)?.host?.lowercased() else {
+            throw MirrorError.invalidMirror(mirror)
+        }
+        if !ModelScopeMirrorPolicy.allowedHosts.contains(host) {
+            throw MirrorError.invalidMirror(mirror)
+        }
     }
 }
 
@@ -218,8 +292,11 @@ public final class SourceRegistry: @unchecked Sendable {
     
     public init() {
         queue.sync {
-            sources["huggingface"] = HuggingFaceSource()
-            sources["modelscope"] = ModelScopeSource()
+            // Default sources are constructed with `nil` mirror, which cannot
+            // fail validation; a failed construction here means a programmer
+            // error, not a runtime condition.
+            sources["huggingface"] = try! HuggingFaceSource()
+            sources["modelscope"] = try! ModelScopeSource()
         }
     }
     

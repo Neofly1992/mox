@@ -13,6 +13,8 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.10.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.68.0"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-examples.git", from: "2.25.4"),
+        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),
     ],
     targets: [
         .target(
@@ -24,6 +26,10 @@ let package = Package(
             dependencies: [
                 "MoxShared",
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXLLM", package: "mlx-swift-examples"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
+                .product(name: "Hub", package: "swift-transformers"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
             ]
         ),
         .target(
@@ -31,9 +37,9 @@ let package = Package(
             dependencies: [
                 "MoxCore",
                 "MoxShared",
-                .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
             ]
         ),
         .executableTarget(
@@ -48,7 +54,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MoxCoreTests",
-            dependencies: ["MoxCore"]
+            dependencies: ["MoxCore", "MoxShared", "MoxServer"]
         ),
     ]
 )

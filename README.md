@@ -8,27 +8,32 @@
 
 ## 功能状态
 
-### ✅ 已完成 (v0.1.0-Alpha)
+### ✅ 已完成 (v0.2)
 
-| 命令 | 功能 | 状态 |
+| 命令 / 能力 | 功能 | 状态 |
 |------|------|------|
 | `mox pull <model>` | 从 HuggingFace 下载模型 | ✅ |
 | `mox pull <model> --source modelscope` | 从 ModelScope 下载模型 | ✅ |
 | `mox list` | 列出本地模型 | ✅ |
-| `mox run <model>` | 启动 API 服务器 | ✅ |
-| `mox chat <model>` | 交互式聊天 | ✅ |
-| `mox -m "prompt"` | 单次对话 | ✅ |
+| `mox run <model>` | 启动 OpenAI 兼容 API 服务器 | ✅ |
+| `mox chat <model>` | REPL 交互式聊天（`/exit` `/clear` `/help`） | ✅ |
 | `mox delete <model>` | 删除模型 | ✅ |
-| 内存检查 | 加载前检查内存 | ✅ |
-| 断点续传 | HTTP Range 支持 | ✅ |
+| 内存检查 | 加载前检查 | ✅ |
+| 断点续传 | HTTP Range + SHA-256 完整性 | ✅ |
+| 模型推理 | MLXLLM 接入（`MLXLMCommon.generate`） | ✅ |
+| 路径穿越防御 | `ModelPathGuard` 校验下载文件名 | ✅ |
+| 镜像白名单 | HuggingFace/ModelScope host allowlist | ✅ |
+| 资源安全 | Server 改 swift-nio，无 socket fd 泄漏 | ✅ |
+| Swift 6 actor | ModelManager / ConfigManager / SourceRegistry | ✅ |
 
-### 🔧 待完成
+### 🔧 进行中 / 计划中
 
-- [ ] 模型推理（MLX Swift API 集成）
-- [ ] 下载进度显示优化
-- [ ] 流式输出
-- [ ] 模型搜索
+- [ ] **流式输出 (SSE)** — `ModelRunner.chatStream` API 已就位，HTTP server SSE 路由代码草拟中。**需真机 M 芯片验证**（x86_64 模拟器无法跑 MLX Metal）。
+- [ ] 下载进度 JSON 化（脚本友好）
+- [ ] `mox list --json` 输出
+- [ ] `mox search <query>` 搜索 HF/ModelScope
 - [ ] SwiftUI GUI
+- [ ] 真实 M 芯片 Mac 端到端验证
 
 ## 快速开始
 

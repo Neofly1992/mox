@@ -159,8 +159,8 @@ struct MoxSecurityTests {
         try Data("fake weights".utf8).write(to: modelDir.appendingPathComponent("weights.bin"))
 
         let manager = ModelManager(modelsDirectory: dir.path)
-        manager.invalidateCache()
-        let models = try manager.listModels()
+        await manager.invalidateCache()
+        let models = try await manager.listModels()
         guard let entry = models.first(where: { $0.id == "my-org/some-model" }) else {
             Issue.record("manifested model not listed")
             return
@@ -182,8 +182,8 @@ struct MoxSecurityTests {
         try Data("x".utf8).write(to: legacyDir.appendingPathComponent("weights.bin"))
 
         let manager = ModelManager(modelsDirectory: dir.path)
-        manager.invalidateCache()
-        let models = try manager.listModels()
+        await manager.invalidateCache()
+        let models = try await manager.listModels()
         guard let entry = models.first(where: { $0.id == "legacy-model-dir" }) else {
             Issue.record("legacy directory not listed")
             return

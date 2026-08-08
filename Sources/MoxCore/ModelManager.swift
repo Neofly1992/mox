@@ -42,12 +42,13 @@ enum ModelPathGuard {
     }
 }
 
-public final class ModelManager: @unchecked Sendable {
+/// Owns the on-disk model cache (`~/.mox/models`) and serializes every read,
+/// write, and download through the actor's executor. Every method runs on the
+/// actor's executor; callers `await` to hop in.
+public actor ModelManager {
     public static let shared = ModelManager()
 
     private let modelsDirectory: URL
-    private let queue = DispatchQueue(label: "com.mox.modelmanager", attributes: .concurrent)
-    private var cachedModels: [String: ModelInfo]?
 
     public init(modelsDirectory: String? = nil) {
         if let dir = modelsDirectory {
@@ -60,100 +61,87 @@ public final class ModelManager: @unchecked Sendable {
         try? FileManager.default.createDirectory(at: self.modelsDirectory, withIntermediateDirectories: true)
     }
 
-    public func listModels() throws -> [ModelInfo] {
-        return try queue.sync {
-            if let cached = cachedModels {
-                return Array(cached.values).sorted { $0.name < $1.name }
-            }
+    /// Lists every model directory under `modelsDirectory`. Reads from disk on
+    /// every call: the actor already serializes access, so a separate cache
+    /// would just trade staleness for complexity.
+    public func listModels() async throws -> [ModelInfo] {
+        var models: [ModelInfo] = []
 
-            var models: [ModelInfo] = []
-
-            guard FileManager.default.fileExists(atPath: modelsDirectory.path) else {
-                return models
-            }
-
-            let contents = try FileManager.default.contentsOfDirectory(
-                at: modelsDirectory,
-                includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .contentModificationDateKey],
-                options: [.skipsHiddenFiles]
-            )
-
-            for modelDir in contents {
-                var isDirectory: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: modelDir.path, isDirectory: &isDirectory),
-                      isDirectory.boolValue else {
-                    continue
-                }
-
-                let size = try calculateDirectorySize(at: modelDir)
-                let modDate = (try? modelDir.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
-
-                let manifestURL = modelDir.appendingPathComponent("mox.json")
-                let info: ModelInfo
-                if let manifestData = try? Data(contentsOf: manifestURL),
-                   let manifest = try? JSONDecoder().decode(ModelManifest.self, from: manifestData) {
-                    info = ModelInfo(
-                        id: manifest.id,
-                        name: manifest.id,
-                        source: manifest.source,
-                        path: modelDir.path,
-                        size: size,
-                        lastUsed: modDate
-                    )
-                } else {
-                    // Legacy / foreign model directories (no manifest): surface
-                    // as `unknown` instead of fabricating a source guess.
-                    info = ModelInfo(
-                        id: modelDir.lastPathComponent,
-                        name: modelDir.lastPathComponent,
-                        source: .unknown,
-                        path: modelDir.path,
-                        size: size,
-                        lastUsed: modDate
-                    )
-                }
-                models.append(info)
-            }
-
-            var newCache: [String: ModelInfo] = [:]
-            for model in models {
-                newCache[model.id] = model
-            }
-            cachedModels = newCache
-
-            return models.sorted { $0.name < $1.name }
+        guard FileManager.default.fileExists(atPath: modelsDirectory.path) else {
+            return models
         }
+
+        let contents = try FileManager.default.contentsOfDirectory(
+            at: modelsDirectory,
+            includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        for modelDir in contents {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: modelDir.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                continue
+            }
+
+            let size = try calculateDirectorySize(at: modelDir)
+            let modDate = (try? modelDir.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+
+            let manifestURL = modelDir.appendingPathComponent("mox.json")
+            let info: ModelInfo
+            if let manifestData = try? Data(contentsOf: manifestURL),
+               let manifest = try? JSONDecoder().decode(ModelManifest.self, from: manifestData) {
+                info = ModelInfo(
+                    id: manifest.id,
+                    name: manifest.id,
+                    source: manifest.source,
+                    path: modelDir.path,
+                    size: size,
+                    lastUsed: modDate
+                )
+            } else {
+                // Legacy / foreign model directories (no manifest): surface
+                // as `unknown` instead of fabricating a source guess.
+                info = ModelInfo(
+                    id: modelDir.lastPathComponent,
+                    name: modelDir.lastPathComponent,
+                    source: .unknown,
+                    path: modelDir.path,
+                    size: size,
+                    lastUsed: modDate
+                )
+            }
+            models.append(info)
+        }
+
+        return models.sorted { $0.name < $1.name }
     }
 
-    public func modelInfo(for id: String) throws -> ModelInfo? {
-        return try listModels().first { $0.id == id }
+    public func modelInfo(for id: String) async throws -> ModelInfo? {
+        return try await listModels().first { $0.id == id }
     }
 
-    public func modelPath(for id: String) throws -> URL {
-        guard let info = try modelInfo(for: id) else {
+    public func modelPath(for id: String) async throws -> URL {
+        guard let info = try await modelInfo(for: id) else {
             throw ModelError.notFound(id)
         }
         return URL(fileURLWithPath: info.path)
     }
 
-    public func deleteModel(id: String) throws {
-        let path = try modelPath(for: id)
+    public func deleteModel(id: String) async throws {
+        let path = try await modelPath(for: id)
 
         try FileManager.default.removeItem(at: path)
-
-        queue.async(flags: .barrier) {
-            self.cachedModels?.removeValue(forKey: id)
-        }
     }
 
     public func pullModel(
         id: String,
         source: ModelSource,
-        progressHandler: ((DownloadProgress) -> Void)? = nil
+        progressHandler: (@Sendable (DownloadProgress) -> Void)? = nil
     ) async throws -> ModelInfo {
         // Resolve any configured mirror once and validate against the source's
         // host allowlist before we touch the network.
-        let config = try? ConfigManager.shared.load()
+        let config = try? await ConfigManager.shared.load()
         let resolvedId: String
 
         switch source {
@@ -261,10 +249,6 @@ public final class ModelManager: @unchecked Sendable {
                 lastUsed: nil
             )
 
-            queue.async(flags: .barrier) {
-                self.cachedModels?[resolvedId] = modelInfo
-            }
-
             return modelInfo
         } catch {
             try? FileManager.default.removeItem(at: destinationDir)
@@ -275,7 +259,7 @@ public final class ModelManager: @unchecked Sendable {
     private func downloadFromHuggingFace(
         modelId: String,
         destination: URL,
-        progressHandler: ((DownloadProgress) -> Void)?
+        progressHandler: (@Sendable (DownloadProgress) -> Void)?
     ) async throws {
         let base = "https://huggingface.co"
         let apiURL = URL(string: "\(base)/api/models/\(modelId)")!
@@ -311,11 +295,15 @@ public final class ModelManager: @unchecked Sendable {
                 throw ModelError.invalidFileName(file)
             }
 
+            // Snapshot the cumulative byte count at the call site so the
+            // progress closure doesn't have to capture the in-place mutable
+            // counter (which isn't Sendable across actor boundaries).
+            let previousDownloaded = downloadedSize
             try await downloader.download(from: fileURL, to: safeLocalURL) { progress in
                 let incremental = Int64(Double(totalSize) * progress / Double(files.count))
                 progressHandler?(DownloadProgress(
                     modelId: modelId,
-                    bytesDownloaded: downloadedSize + incremental,
+                    bytesDownloaded: previousDownloaded + incremental,
                     totalBytes: totalSize
                 ))
             }
@@ -328,7 +316,7 @@ public final class ModelManager: @unchecked Sendable {
     private func downloadFromModelScope(
         modelId: String,
         destination: URL,
-        progressHandler: ((DownloadProgress) -> Void)?
+        progressHandler: (@Sendable (DownloadProgress) -> Void)?
     ) async throws {
         let base = "https://modelscope.cn/api/v1/models"
         let parts = modelId.split(separator: "/")
@@ -369,8 +357,10 @@ public final class ModelManager: @unchecked Sendable {
                 throw ModelError.invalidFileName(fileName)
             }
 
-            let fileProgress: ((Double) -> Void)? = { progress in
-                let bytesSoFar = downloadedSize + Int64(Double(declaredSize) * progress)
+            // Same Sendable-friendly snapshot trick as in `downloadFromHuggingFace`.
+            let previousDownloaded = downloadedSize
+            let fileProgress: @Sendable (Double) -> Void = { progress in
+                let bytesSoFar = previousDownloaded + Int64(Double(declaredSize) * progress)
                 progressHandler?(DownloadProgress(
                     modelId: modelId,
                     bytesDownloaded: bytesSoFar,
@@ -401,10 +391,11 @@ public final class ModelManager: @unchecked Sendable {
         return size
     }
 
+    /// Kept for API compatibility with existing callers (notably the test
+    /// suite). The on-disk read in `listModels` is authoritative now, so this
+    /// is effectively a no-op.
     public func invalidateCache() {
-        queue.async(flags: .barrier) {
-            self.cachedModels = nil
-        }
+        // Intentionally empty: `listModels` reads from disk every call.
     }
 
     /// Build a HuggingFaceSource using the configured mirror only when one is

@@ -23,7 +23,7 @@ public actor ModelRunner {
             return entry.record
         }
 
-        guard let modelInfo = try? ModelManager.shared.modelInfo(for: id) else {
+        guard let modelInfo = try? await ModelManager.shared.modelInfo(for: id) else {
             throw ModelError.notFound(id)
         }
 
@@ -67,7 +67,7 @@ public actor ModelRunner {
         temperature: Double? = nil,
         topP: Double? = nil
     ) async throws -> String {
-        let defaults = Self.resolvedDefaults()
+        let defaults = await Self.resolvedDefaults()
         let params = Self.makeParameters(
             maxTokens: maxTokens ?? defaults.maxTokens,
             temperature: temperature ?? defaults.temperature,
@@ -84,7 +84,7 @@ public actor ModelRunner {
         temperature: Double? = nil,
         topP: Double? = nil
     ) async throws -> ChatCompletionResponse {
-        let defaults = Self.resolvedDefaults()
+        let defaults = await Self.resolvedDefaults()
         let tokens = maxTokens ?? defaults.maxTokens
         let temp = temperature ?? defaults.temperature
         let p = topP ?? defaults.topP
@@ -93,10 +93,17 @@ public actor ModelRunner {
         let chat = Self.toChatMessages(messages)
         let input = UserInput(chat: chat)
 
-        let stream = chatStream(modelId: modelId, input: input, parameters: params)
+        let container = try await container(for: modelId)
+        let stream = try await container.perform { context -> AsyncStream<Generation> in
+            let lmInput = try await context.processor.prepare(input: input)
+            return try MLXLMCommon.generate(
+                input: lmInput, parameters: params, context: context)
+        }
         var assembled = ""
-        for await chunk in stream {
-            assembled += chunk
+        for await event in stream {
+            if case .chunk(let text) = event {
+                assembled += text
+            }
         }
 
         let promptTokens = Self.estimatePromptTokens(messages)
@@ -129,35 +136,26 @@ public actor ModelRunner {
         temperature: Double? = nil,
         topP: Double? = nil
     ) -> AsyncStream<String> {
-        let defaults = Self.resolvedDefaults()
-        let tokens = maxTokens ?? defaults.maxTokens
-        let temp = temperature ?? defaults.temperature
-        let p = topP ?? defaults.topP
-        let params = Self.makeParameters(maxTokens: tokens, temperature: temp, topP: p)
-        let input = UserInput(chat: Self.toChatMessages(messages))
-        return chatStream(modelId: modelId, input: input, parameters: params)
-    }
-
-    // MARK: - Internals
-
-    private struct Entry {
-        let container: ModelContainer
-        let record: LoadedModel
-    }
-
-    private func chatStream(
-        modelId: String,
-        input: UserInput,
-        parameters: GenerateParameters
-    ) -> AsyncStream<String> {
-        AsyncStream { continuation in
+        let chat = Self.toChatMessages(messages)
+        let input = UserInput(chat: chat)
+        return AsyncStream { continuation in
             let task = Task {
                 do {
+                    // Config + parameter resolution happens inside the Task so
+                    // the public method can keep its synchronous signature
+                    // even though `resolvedDefaults()` is now async (it
+                    // touches the actor-isolated `ConfigManager`).
+                    let defaults = await Self.resolvedDefaults()
+                    let tokens = maxTokens ?? defaults.maxTokens
+                    let temp = temperature ?? defaults.temperature
+                    let p = topP ?? defaults.topP
+                    let params = Self.makeParameters(maxTokens: tokens, temperature: temp, topP: p)
+
                     let container = try await self.container(for: modelId)
                     let stream = try await container.perform { context -> AsyncStream<Generation> in
                         let lmInput = try await context.processor.prepare(input: input)
                         return try MLXLMCommon.generate(
-                            input: lmInput, parameters: parameters, context: context)
+                            input: lmInput, parameters: params, context: context)
                     }
                     for await event in stream {
                         switch event {
@@ -178,6 +176,13 @@ public actor ModelRunner {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    // MARK: - Internals
+
+    private struct Entry {
+        let container: ModelContainer
+        let record: LoadedModel
     }
 
     private func runGeneration(
@@ -225,8 +230,8 @@ public actor ModelRunner {
         )
     }
 
-    private static func resolvedDefaults() -> AppConfig.ModelDefaults {
-        (try? ConfigManager.shared.load())?.defaults ?? AppConfig.ModelDefaults()
+    private static func resolvedDefaults() async -> AppConfig.ModelDefaults {
+        (try? await ConfigManager.shared.load())?.defaults ?? AppConfig.ModelDefaults()
     }
 
     private static func toChatMessages(_ messages: [ChatMessage]) -> [Chat.Message] {

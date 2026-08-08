@@ -194,19 +194,27 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
     }
 
     private func handleListModels(channel: Channel) {
-        do {
-            let models = try ModelManager.shared.listModels()
-            let items = models.map { info -> ModelItem in
-                ModelItem(
-                    id: info.id,
-                    name: info.name,
-                    source: info.source.rawValue,
-                    size: info.size
-                )
+        // listModels is now async because ModelManager is an actor. Dispatch
+        // the response on the channel's event loop after awaiting.
+        Task {
+            do {
+                let models = try await ModelManager.shared.listModels()
+                let items = models.map { info -> ModelItem in
+                    ModelItem(
+                        id: info.id,
+                        name: info.name,
+                        source: info.source.rawValue,
+                        size: info.size
+                    )
+                }
+                channel.eventLoop.execute {
+                    self.respond(on: channel, status: .ok, payload: ModelListResponse(object: "list", data: items))
+                }
+            } catch {
+                channel.eventLoop.execute {
+                    self.respondError(on: channel, error: error)
+                }
             }
-            respond(on: channel, status: .ok, payload: ModelListResponse(object: "list", data: items))
-        } catch {
-            respondError(on: channel, error: error)
         }
     }
 

@@ -112,7 +112,7 @@ struct MoxCLI {
         let modelManager = ModelManager.shared
         
         do {
-            let progressHandler: (DownloadProgress) -> Void = { progress in
+            let progressHandler: @Sendable (DownloadProgress) -> Void = { progress in
                 let percent = Int(progress.progress * 100)
                 let downloaded = ByteCountFormatter.string(fromByteCount: progress.bytesDownloaded, countStyle: .file)
                 let total = ByteCountFormatter.string(fromByteCount: progress.totalBytes, countStyle: .file)
@@ -132,7 +132,7 @@ struct MoxCLI {
         let modelManager = ModelManager.shared
         
         do {
-            let models = try modelManager.listModels()
+            let models = try await modelManager.listModels()
             
             if models.isEmpty {
                 print("No models installed. Run 'mox pull <model>' to download a model.")
@@ -153,7 +153,7 @@ struct MoxCLI {
     }
     
     static func handleRun(args: [String]) async throws {
-        let config = (try? ConfigManager.shared.load()) ?? AppConfig()
+        let config = (try? await ConfigManager.shared.load()) ?? AppConfig()
         var modelId: String?
         var port: Int = config.server.port
         var host: String = config.server.host
@@ -192,7 +192,7 @@ struct MoxCLI {
         
         let modelManager = ModelManager.shared
         
-        guard let modelInfo = try? modelManager.modelInfo(for: id) else {
+        guard let modelInfo = try? await modelManager.modelInfo(for: id) else {
             print("Model '\(id)' not found. Run 'mox pull \(id)' first.")
             return
         }
@@ -218,71 +218,97 @@ struct MoxCLI {
     }
     
     static func handleChat(args: [String]) async throws {
+        // Parse args: positional model id is required. Other flags (legacy
+        // `-m <prompt>` one-shot usage) are intentionally ignored — REPL mode
+        // supersedes the single-prompt form.
         var modelId: String?
-        var prompt: String?
-        
-        var i = 0
-        while i < args.count {
-            switch args[i] {
-            case "--model", "-m":
-                i += 1
-                if i < args.count {
-                    if modelId == nil {
-                        modelId = args[i]
-                    } else {
-                        prompt = args[i]
-                    }
-                }
-            default:
-                if modelId == nil {
-                    modelId = args[i]
-                } else if prompt == nil {
-                    prompt = args[i]
-                }
+        for token in args where !token.hasPrefix("-") {
+            if modelId == nil {
+                modelId = token
             }
-            i += 1
+            // Additional positional tokens are ignored in REPL mode.
         }
-        
+
         guard let id = modelId else {
             print("Error: Model ID required")
-            print("Usage: mox chat <model-id> [-m \"prompt\"]")
+            print("Usage: mox chat <model-id>")
             return
         }
-        
-        if prompt == nil {
-            print("Enter your message (Ctrl+D to finish input):")
-            let input = readLine()
-            prompt = input
-        }
-        
-        guard let userPrompt = prompt, !userPrompt.isEmpty else {
-            print("Error: Prompt cannot be empty")
-            return
-        }
-        
+
         let modelManager = ModelManager.shared
-        
-        guard let modelInfo = try? modelManager.modelInfo(for: id) else {
+
+        guard let modelInfo = try? await modelManager.modelInfo(for: id) else {
             print("Model '\(id)' not found. Run 'mox pull \(id)' first.")
             return
         }
-        
-        print("Loading model: \(modelInfo.name)...")
-        
+
         let runner = ModelRunner.shared
-        let messages = [ChatMessage(role: "user", content: userPrompt)]
-        
-        do {
-            let response = try await runner.chat(
-                modelId: id,
-                messages: messages
-            )
-            
-            if let content = response.choices.first?.message.content {
-                print("\n\(content)")
+
+        // Banner — printed before the first prompt so the user sees model + commands.
+        print("mox chat — \(modelInfo.name)")
+        print("type /help for commands, /exit to quit")
+
+        var messages: [ChatMessage] = []
+
+        // REPL loop. readLine returns nil on EOF (Ctrl+D / closed pipe) — exit silently.
+        while true {
+            print("> ", terminator: "")
+            guard let line = readLine(strippingNewline: true) else {
+                break
             }
-        } catch {
-            print("Error: \(error.localizedDescription)")
+
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                continue
+            }
+
+            switch trimmed {
+            case "/exit", "/quit":
+                return
+            case "/clear":
+                messages.removeAll()
+                print("(conversation cleared)")
+                continue
+            case "/help":
+                print("""
+                Commands:
+                  /exit, /quit   End the session
+                  /clear         Clear conversation history
+                  /help          Show this help
+
+                Anything else is sent to the model as a user message.
+                """)
+                continue
+            default:
+                break
+            }
+
+            messages.append(ChatMessage(role: "user", content: trimmed))
+
+            do {
+                let response = try await runner.chat(
+                    modelId: id,
+                    messages: messages
+                )
+
+                if let content = response.choices.first?.message.content {
+                    messages.append(ChatMessage(role: "assistant", content: content))
+                    print("\n\(content)")
+                }
+
+                let usage = response.usage
+                print("[tokens prompt=\(usage.promptTokens) completion=\(usage.completionTokens) total=\(usage.totalTokens)]")
+                print("")
+            } catch {
+                // Pop the user message we just appended so a failed turn doesn't
+                // poison subsequent context, but keep the REPL alive so the user
+                // can retry or /exit.
+                if !messages.isEmpty {
+                    messages.removeLast()
+                }
+                print("Error: \(error.localizedDescription)")
+                print("")
+            }
         }
     }
     
@@ -296,7 +322,7 @@ struct MoxCLI {
         let modelId = args[0]
         let modelManager = ModelManager.shared
         
-        guard let modelInfo = try? modelManager.modelInfo(for: modelId) else {
+        guard let modelInfo = try? await modelManager.modelInfo(for: modelId) else {
             print("Model '\(modelId)' not found.")
             return
         }
@@ -305,7 +331,7 @@ struct MoxCLI {
         print("This will remove all files from: \(modelInfo.path)")
         
         do {
-            try modelManager.deleteModel(id: modelId)
+            try await modelManager.deleteModel(id: modelId)
             print("Successfully deleted model: \(modelId)")
         } catch {
             print("Error deleting model: \(error.localizedDescription)")

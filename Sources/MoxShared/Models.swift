@@ -284,34 +284,29 @@ public struct ModelScopeSource: ModelSourceResolver, Sendable {
     }
 }
 
-public final class SourceRegistry: @unchecked Sendable {
+public actor SourceRegistry {
     public static let shared = SourceRegistry()
-    
+
     private var sources: [String: ModelSourceResolver] = [:]
-    private let queue = DispatchQueue(label: "com.mox.sourceregistry", attributes: .concurrent)
-    
+
     public init() {
-        queue.sync {
-            // Default sources are constructed with `nil` mirror, which cannot
-            // fail validation; a failed construction here means a programmer
-            // error, not a runtime condition.
-            sources["huggingface"] = try! HuggingFaceSource()
-            sources["modelscope"] = try! ModelScopeSource()
-        }
+        // Default sources are constructed with `nil` mirror, which cannot fail
+        // validation; a failed construction here means a programmer error, not
+        // a runtime condition. Actor initializers run synchronously, so we can
+        // populate state directly.
+
+        sources["huggingface"] = try! HuggingFaceSource()
+        sources["modelscope"] = try! ModelScopeSource()
     }
-    
+
     public func registerSource(_ source: ModelSourceResolver) {
-        queue.async(flags: .barrier) {
-            self.sources[source.name] = source
-        }
+        sources[source.name] = source
     }
-    
+
     public func resolver(for name: String) -> ModelSourceResolver? {
-        queue.sync {
-            sources[name]
-        }
+        sources[name]
     }
-    
+
     public func resolve(modelId: String, sourceType: ModelSource) -> String {
         let resolver = sources[sourceType.rawValue] ?? sources["huggingface"]!
         return resolver.resolveModelId(modelId)

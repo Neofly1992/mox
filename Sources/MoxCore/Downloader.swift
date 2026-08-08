@@ -2,7 +2,7 @@ import Foundation
 import MoxShared
 
 public protocol Downloader: Sendable {
-    func download(from url: URL, to destination: URL, progress: ((Double) -> Void)?) async throws
+    func download(from url: URL, to destination: URL, progress: (@Sendable (Double) -> Void)?) async throws
 }
 
 public enum DownloaderError: Error, LocalizedError {
@@ -30,7 +30,7 @@ public final class URLSessionDownloader: Downloader {
         self.session = URLSession(configuration: config)
     }
     
-    public func download(from url: URL, to destination: URL, progress: ((Double) -> Void)?) async throws {
+    public func download(from url: URL, to destination: URL, progress: (@Sendable (Double) -> Void)?) async throws {
         let (bytes, response) = try await session.bytes(from: url)
         
         guard let http = response as? HTTPURLResponse else {
@@ -74,7 +74,7 @@ public final class ResumableDownloader: Downloader {
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     }
     
-    public func download(from url: URL, to destination: URL, progress: ((Double) -> Void)?) async throws {
+    public func download(from url: URL, to destination: URL, progress: (@Sendable (Double) -> Void)?) async throws {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
         
@@ -96,24 +96,24 @@ public final class ResumableDownloader: Downloader {
         try await downloadWithRanges(url: url, to: destination, total: total, progress: progress)
     }
     
-    private func downloadWithRanges(url: URL, to destination: URL, total: Int64, progress: ((Double) -> Void)?) async throws {
+    private func downloadWithRanges(url: URL, to destination: URL, total: Int64, progress: (@Sendable (Double) -> Void)?) async throws {
         let partCount = 4
         let partSize = total / Int64(partCount)
         let tempFiles = (0..<partCount).map { tempDir.appendingPathComponent("part\($0)") }
-        
+
         try await withThrowingTaskGroup(of: Void.self) { group in
             for i in 0..<partCount {
                 let start = Int64(i) * partSize
                 let end = i == partCount - 1 ? total - 1 : start + partSize - 1
-                
+
                 group.addTask {
                     try await self.downloadRange(url: url, range: start...end, to: tempFiles[i])
                 }
             }
-            
+
             for try await _ in group {}
         }
-        
+
         var combined = Data()
         for url in tempFiles {
             let data = try Data(contentsOf: url)
@@ -121,7 +121,7 @@ public final class ResumableDownloader: Downloader {
             try FileManager.default.removeItem(at: url)
         }
         try combined.write(to: destination)
-        
+
         progress?(1.0)
     }
     

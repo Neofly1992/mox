@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import MoxCore
 import MoxServer
 import MoxShared
@@ -28,6 +28,8 @@ struct MoxCLI {
             try await handleChat(args: Array(args[2...]))
         case "ask":
             do { try await handleAsk(args: Array(args[2...])) } catch let e as AskError { exit(e == .notFound ? 1 : 2) } catch { exit(1) }
+        case "debug":
+            try await handleDebug(args: Array(args[2...]))
         case "help", "--help", "-h":
             printHelp()
         case "version", "--version":
@@ -505,7 +507,148 @@ struct MoxCLI {
             print("Error deleting model: \(error.localizedDescription)")
         }
     }
+
+    // MARK: - debug (developer utilities)
+
+    static func handleDebug(args: [String]) async {
+        let cmd = args.first ?? "help"
+        switch cmd {
+        case "db":
+            handleDebugDB(Array(args.dropFirst()))
+        case "models":
+            await handleDebugModels()
+        case "daemon":
+            handleDebugDaemon()
+        case "open-data-dir":
+            handleDebugOpenDataDir()
+        default:
+            printDebugHelp()
+        }
+    }
+
+    static func printDebugHelp() {
+        print("""
+        mox debug — developer utilities
+
+        Subcommands:
+          db schema          Print conversations + messages schema (via sqlite3)
+          db list            List conversations (id, title, model, updated)
+          db dump <conv-id>  Dump one conversation as message table
+          db search <q>      LIKE-based content search across messages
+          db shell           Spawn interactive sqlite3 on conversations.db
+          models             List installed models with size + source
+          daemon             Show mox-server launchd status
+          open-data-dir      open ~/Library/Application Support/Mox in Finder
+        """)
+    }
+
+    static func conversationsDBPath() -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/Library/Application Support/Mox/conversations.sqlite"
+    }
+
+    static func handleDebugDB(_ args: [String]) {
+        let sub = args.first ?? "help"
+        let path = conversationsDBPath()
+        guard FileManager.default.fileExists(atPath: path) else {
+            print("No conversations.db at \(path)")
+            return
+        }
+        switch sub {
+        case "schema":
+            runShell("/usr/bin/sqlite3", [path, ".schema conversations", ".schema messages", ".quit"])
+        case "list":
+            runShell("/usr/bin/sqlite3", ["-header", "-column", path,
+                "SELECT id, substr(title, 1, 40), model_id, datetime(updated_at, 'unixepoch') FROM conversations ORDER BY updated_at DESC LIMIT 20;",
+                ".quit"])
+        case "dump":
+            guard args.count >= 2 else { print("Usage: mox debug db dump <conv-id>"); return }
+            runShell("/usr/bin/sqlite3", ["-header", "-column", path,
+                "SELECT role, datetime(created_at, 'unixepoch'), substr(content, 1, 200) FROM messages WHERE conversation_id = '\(args[1])' ORDER BY created_at;",
+                ".quit"])
+        case "search":
+            guard args.count >= 2 else { print("Usage: mox debug db search <query>"); return }
+            let q = args.dropFirst().joined(separator: " ")
+            runShell("/usr/bin/sqlite3", ["-header", "-column", path,
+                "SELECT m.conversation_id, m.role, substr(m.content, 1, 200) FROM messages m WHERE m.content LIKE '%\(q)%' ORDER BY m.created_at DESC LIMIT 20;",
+                ".quit"])
+        case "shell":
+            runShell("/usr/bin/sqlite3", [path])
+        default:
+            print("Unknown db subcommand: \(sub)")
+            print("Try: schema | list | dump <id> | search <q> | shell")
+        }
+    }
+
+    static func handleDebugModels() async {
+        // ModelManager is an actor; await listModels directly since
+        // handleDebug is already async.
+        let models: [ModelInfo]
+        do {
+            models = try await ModelManager.shared.listModels()
+        } catch {
+            print("Error: \(error.localizedDescription)")
+            return
+        }
+        if models.isEmpty {
+            print("No models installed.")
+            return
+        }
+        print(String(format: "%-50s %-15s %10s", "ID", "SOURCE", "SIZE"))
+        print(String(repeating: "-", count: 80))
+        for m in models {
+            print(String(format: "%-50s %-15s %10s", m.id, m.source.rawValue, m.sizeDescription))
+        }
+    }
+
+    static func handleDebugDaemon() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = ["list"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let out = String(data: data, encoding: .utf8) else { return }
+            let lines = out.split(separator: "\n")
+            if let line = lines.first(where: { $0.contains("com.mox.server") }) {
+                let pid = line.split(separator: "\t").first ?? "-"
+                print("com.mox.server: loaded (PID \(pid))")
+            } else {
+                print("com.mox.server: not loaded")
+            }
+        } catch {
+            print("Error: \(error.localizedDescription)")
+        }
+    }
+
+    static func handleDebugOpenDataDir() {
+        let path = "\(FileManager.default.homeDirectoryForCurrentUser.path)/Library/Application Support/Mox"
+        let url = URL(fileURLWithPath: path)
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            print("Error: \(error.localizedDescription)")
+        }
+    }
+
+    static func runShell(_ exe: String, _ args: [String]) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = args
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            print("Failed to run \(exe): \(error.localizedDescription)")
+        }
+    }
 }
+
+// MARK: -
 
 /// `throw AskError(...)` works in `async throws` contexts.
 private enum AskError: Error {

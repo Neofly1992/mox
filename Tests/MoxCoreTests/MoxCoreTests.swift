@@ -7,7 +7,7 @@ final class MoxCoreTests: XCTestCase {
         let config = AppConfig()
         XCTAssertEqual(config.version, 1)
         XCTAssertEqual(config.defaultSource, .huggingface)
-        XCTAssertEqual(config.server.port, 8080)
+        XCTAssertEqual(config.server.port, 11555)
     }
     
     func testModelInfo() throws {
@@ -51,5 +51,68 @@ final class MoxCoreTests: XCTestCase {
 
         let ids = await ModelRunner.shared.listLoadedModels()
         XCTAssertTrue(ids.isEmpty)
+    }
+
+    /// The CLI's `mox ask` (non-streaming) emits a single
+    /// `ChatCompletionResponse` document. Lock the JSON shape so the daemon's
+    /// `/v1/chat/completions` endpoint and the GUI's `HTTPAPIClient` agree
+    /// on field names.
+    func testChatCompletionResponseShape() throws {
+        let response = ChatCompletionResponse(
+            id: "chatcmpl-abc",
+            created: 1_700_000_000,
+            model: "Qwen/Qwen2.5-0.5B-Instruct",
+            choices: [
+                ChatCompletionResponse.Choice(
+                    index: 0,
+                    message: ChatCompletionResponse.AssistantMessage(content: "hi"),
+                    finishReason: "stop"
+                )
+            ],
+            usage: ChatCompletionResponse.Usage(
+                promptTokens: 1,
+                completionTokens: 1,
+                totalTokens: 2
+            )
+        )
+        let data = try JSONEncoder().encode(response)
+        let json = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertTrue(json.contains("\"object\":\"chat.completion\""))
+        XCTAssertTrue(json.contains("\"model\":"))
+        XCTAssertTrue(json.contains("Qwen2.5-0.5B-Instruct"))
+        XCTAssertTrue(json.contains("\"finish_reason\":\"stop\""))
+        XCTAssertTrue(json.contains("\"prompt_tokens\":1"))
+        XCTAssertTrue(json.contains("\"completion_tokens\":1"))
+        XCTAssertTrue(json.contains("\"total_tokens\":2"))
+        XCTAssertTrue(json.contains("\"content\":\"hi\""))
+    }
+
+    /// The CLI's `mox ask --stream` emits one `ChatCompletionChunk` per line.
+    /// Lock the shape so the GUI's `ProcessAPIClient` and the future daemon
+    /// SSE endpoint decode it identically.
+    func testChatCompletionChunkShape() throws {
+        let chunk = ChatCompletionChunk(
+            id: "chatcmpl-xyz",
+            object: "chat.completion.chunk",
+            created: 1_700_000_000,
+            model: "Qwen/Qwen2.5-0.5B-Instruct",
+            choices: [
+                ChatCompletionChunk.Choice(
+                    index: 0,
+                    delta: ChatCompletionChunk.Delta(role: "assistant", content: "hi"),
+                    finishReason: nil
+                )
+            ]
+        )
+        let data = try JSONEncoder().encode(chunk)
+        let json = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertTrue(json.contains("\"object\":\"chat.completion.chunk\""))
+        XCTAssertTrue(json.contains("\"role\":\"assistant\""))
+        XCTAssertTrue(json.contains("\"content\":\"hi\""))
+        // Swift's default JSONEncoder omits nil Optionals — `finish_reason`
+        // is dropped from the wire payload when null. The CLI's streaming
+        // output therefore omits the key entirely for content chunks; the
+        // terminal "stop" chunk emits it.
+        XCTAssertFalse(json.contains("finish_reason"))
     }
 }

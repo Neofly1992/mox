@@ -8,7 +8,10 @@ let package = Package(
         .iOS(.v17)
     ],
     products: [
-        .executable(name: "mox", targets: ["MoxCLI"])
+        .executable(name: "mox", targets: ["MoxCLI"]),
+        .executable(name: "mox-server", targets: ["MoxServerCLI"]),
+        .executable(name: "mox-gui", targets: ["MoxGUI"]),
+        .library(name: "MoxGUIClient", targets: ["MoxGUIClient"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.10.0"),
@@ -42,6 +45,10 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]
         ),
+        .target(
+            name: "MoxGUIClient",
+            dependencies: ["MoxShared"]
+        ),
         .executableTarget(
             name: "MoxCLI",
             dependencies: [
@@ -52,9 +59,24 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
+        .executableTarget(
+            name: "MoxServerCLI",
+            dependencies: ["MoxCore", "MoxServer", "MoxShared"]
+        ),
+        .executableTarget(
+            name: "MoxGUI",
+            dependencies: [
+                "MoxGUIClient",
+                "MoxShared"
+            ]
+        ),
         .testTarget(
             name: "MoxCoreTests",
             dependencies: ["MoxCore", "MoxShared", "MoxServer"]
         ),
-    ]
+        .testTarget(
+            name: "MoxGUIClientTests",
+            dependencies: ["MoxGUIClient", "MoxShared"]
+        ),
+     ]
 )

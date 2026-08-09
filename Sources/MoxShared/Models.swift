@@ -70,11 +70,11 @@ public struct AppConfig: Codable, Sendable {
         
         public init() {}
     }
-    
+
     public struct ServerConfig: Codable, Sendable {
         public var host: String = "127.0.0.1"
-        public var port: Int = 8080
-        
+        public var port: Int = 11555
+
         public init() {}
     }
     
@@ -185,6 +185,52 @@ public struct ChatCompletionResponse: Codable, Sendable {
             self.completionTokens = completionTokens
             self.totalTokens = totalTokens
         }
+    }
+}
+
+/// OpenAI-compatible streaming chunk. One document per line on the wire; the
+/// HTTP daemon's eventual SSE endpoint will emit the same shape, so the CLI
+/// subcommand and the GUI client agree on format from day one.
+public struct ChatCompletionChunk: Codable, Sendable {
+    public let id: String
+    public let object: String
+    public let created: Int64
+    public let model: String
+    public let choices: [Choice]
+
+    public struct Choice: Codable, Sendable {
+        public let index: Int
+        public let delta: Delta
+        public let finishReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case index, delta
+            case finishReason = "finish_reason"
+        }
+
+        public init(index: Int, delta: Delta, finishReason: String?) {
+            self.index = index
+            self.delta = delta
+            self.finishReason = finishReason
+        }
+    }
+
+    public struct Delta: Codable, Sendable {
+        public let role: String?
+        public let content: String
+
+        public init(role: String? = nil, content: String) {
+            self.role = role
+            self.content = content
+        }
+    }
+
+    public init(id: String, object: String, created: Int64, model: String, choices: [Choice]) {
+        self.id = id
+        self.object = object
+        self.created = created
+        self.model = model
+        self.choices = choices
     }
 }
 

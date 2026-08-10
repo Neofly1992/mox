@@ -103,7 +103,7 @@ struct MoxGUIClientTests {
 
 // MARK: - AppState helpers
 
-@Suite("MoxGUI startup")
+@Suite("MoxGUI-startup")
 struct MoxGUIStartupTests {
     @Test("MoxGUIConfig.write round-trips server/daemon keys")
     func configRoundTrip() throws {

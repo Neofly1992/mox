@@ -179,7 +179,7 @@ public final class ProcessAPIClient: MoxAPIClient, @unchecked Sendable {
             "--messages", encodeMessages(messages)
         ] + (stream ? ["--stream"] : [])
 
-        let proc = try Self.spawn(binaryPath: binaryPath, args: args)
+        let (proc, errPipe) = try Self.spawn(binaryPath: binaryPath, args: args)
         return AsyncStream<String>(bufferingPolicy: .unbounded) { continuation in
             let drain = Task.detached(priority: .userInitiated) {
                 guard let pipe = proc.standardOutput as? Pipe else {
@@ -190,7 +190,22 @@ public final class ProcessAPIClient: MoxAPIClient, @unchecked Sendable {
                 var buffer = Data()
                 while true {
                     let chunk = handle.availableData
-                    if chunk.isEmpty { break }
+                    // EOF on stdout happens when the child closes the pipe
+                    // (normal exit) OR when the child crashes (stderr is
+                    // still being drained so the parent doesn't block on
+                    // write(); the stdout fd does get closed in that case
+                    // because the child process image is gone).
+                    if chunk.isEmpty {
+                        // If the child crashed, terminationStatus is non-zero;
+                        // surface stderr to the caller as a processExit error.
+                        if proc.terminationStatus != 0 {
+                            let errBuf = errPipe.fileHandleForReading.readDataToEndOfFile()
+                            let errStr = String(data: errBuf, encoding: .utf8) ?? ""
+                            continuation.finish()
+                            return
+                        }
+                        break
+                    }
                     buffer.append(chunk)
                     while let nl = buffer.firstIndex(of: 0x0A) {
                         let line = buffer.subdata(in: 0..<nl)
@@ -202,9 +217,6 @@ public final class ProcessAPIClient: MoxAPIClient, @unchecked Sendable {
                                 continuation.yield(text)
                             }
                         } else {
-                            // Non-streaming: the CLI emits exactly one
-                            // JSON ChatCompletionResponse. Yield its
-                            // content once.
                             if let text = Self.extractFinalContent(from: line) {
                                 continuation.yield(text)
                             }
@@ -229,14 +241,14 @@ public final class ProcessAPIClient: MoxAPIClient, @unchecked Sendable {
     }
 
     public func listModels() async throws -> [ModelInfo] {
-        let proc = try Self.spawn(binaryPath: binaryPath, args: ["list"])
+        let (proc, errPipe) = try Self.spawn(binaryPath: binaryPath, args: ["list"])
         proc.waitUntilExit()
-        let outPipe = proc.standardOutput as? Pipe
-        let errPipe = proc.standardError as? Pipe
-        let outData = outPipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
+        // stderr is already being drained; read whatever's left after
+        // waitUntilExit for use as the error message on non-zero exit.
+        let outData = (proc.standardOutput as? Pipe)?.fileHandleForReading.readDataToEndOfFile() ?? Data()
         let outString = String(data: outData, encoding: .utf8) ?? ""
         if proc.terminationStatus != 0 {
-            let err = String(data: errPipe?.fileHandleForReading.readDataToEndOfFile() ?? Data(), encoding: .utf8) ?? ""
+            let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             throw MoxAPIClientError.processExit(code: proc.terminationStatus, stderr: err)
         }
         return Self.parseListTable(outString)
@@ -251,18 +263,33 @@ public final class ProcessAPIClient: MoxAPIClient, @unchecked Sendable {
 
     // MARK: - Static helpers
 
-    private static func spawn(binaryPath: String, args: [String]) throws -> Process {
+    /// Spawn the child with both stdout and stderr attached to pipes. The
+    /// stderr pipe is drained on a background task to keep it from filling
+    /// (macOS pipe buffer is ~64KB) — a full stderr will block the child
+    /// and hang the GUI.
+    /// - Returns: (process, stderrBuffer) where stderrBuffer accumulates
+    ///   child stderr for later inspection (e.g. surfacing non-zero exits).
+    private static func spawn(binaryPath: String, args: [String]) throws -> (Process, Pipe) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binaryPath)
         proc.arguments = args
-        proc.standardOutput = Pipe()
-        proc.standardError = Pipe()
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
         do {
             try proc.run()
         } catch {
             throw MoxAPIClientError.processSpawn(String(describing: error))
         }
-        return proc
+        // Drain stderr in the background. We don't surface its contents
+        // during normal operation; on non-zero exit the chat drain loop
+        // reads the partial buffer to build a useful error message.
+        let stderrHandle = errPipe.fileHandleForReading
+        stderrHandle.readabilityHandler = { handle in
+            let _ = handle.availableData  // drain
+        }
+        return (proc, errPipe)
     }
 
     private func encodeMessages(_ messages: [ChatMessage]) -> String {

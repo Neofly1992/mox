@@ -33,15 +33,15 @@ struct MoxCLI {
         case "help", "--help", "-h":
             printHelp()
         case "version", "--version":
-            print("Mox v0.1.0")
+            moxPrint("Mox v0.1.0")
         default:
-            print("Unknown command: \(command)")
+            moxPrint("Unknown command: \(command)")
             printHelp()
         }
     }
 
     static func printHelp() {
-        print("""
+        moxStderr("""
         Mox - Magic Box for MLX
 
         Usage: mox <command> [options]
@@ -91,7 +91,7 @@ struct MoxCLI {
                     case "mlx-community", "mlx":
                         source = .mlxCommunity
                     default:
-                        print("Unknown source: \(sourceStr)")
+                        moxPrint("Unknown source: \(sourceStr)")
                         return
                     }
                 }
@@ -109,12 +109,12 @@ struct MoxCLI {
         }
 
         guard let id = modelId else {
-            print("Error: Model ID required")
-            print("Usage: mox pull <model-id> [--source huggingface|modelscope]")
+            moxPrint("Error: Model ID required")
+            moxStderr("Usage: mox pull <model-id> [--source huggingface|modelscope]")
             return
         }
 
-        print("Pulling model: \(id) from \(source.rawValue)...")
+        moxPrint("Pulling model: \(id) from \(source.rawValue)...")
 
         let modelManager = ModelManager.shared
 
@@ -123,15 +123,15 @@ struct MoxCLI {
                 let percent = Int(progress.progress * 100)
                 let downloaded = ByteCountFormatter.string(fromByteCount: progress.bytesDownloaded, countStyle: .file)
                 let total = ByteCountFormatter.string(fromByteCount: progress.totalBytes, countStyle: .file)
-                print("\rDownloading: \(percent)% (\(downloaded)/\(total))", terminator: "")
+                moxPrint("\rDownloading: \(percent)% (\(downloaded)/\(total))", terminator: "")
             }
 
             let modelInfo = try await modelManager.pullModel(id: id, source: source, progressHandler: progressHandler)
-            print("\nSuccessfully pulled model: \(modelInfo.name)")
-            print("Size: \(modelInfo.sizeDescription)")
-            print("Location: \(modelInfo.path)")
+            moxPrint("\nSuccessfully pulled model: \(modelInfo.name)")
+            moxPrint("Size: \(modelInfo.sizeDescription)")
+            moxPrint("Location: \(modelInfo.path)")
         } catch {
-            print("Error pulling model: \(error.localizedDescription)")
+            moxStderr("Error pulling model: \(error.localizedDescription)")
         }
     }
 
@@ -142,20 +142,20 @@ struct MoxCLI {
             let models = try await modelManager.listModels()
 
             if models.isEmpty {
-                print("No models installed. Run 'mox pull <model>' to download a model.")
+                moxPrint("No models installed. Run 'mox pull <model>' to download a model.")
                 return
             }
 
-            print("Installed models:")
-            print(String(format: "%-50s %-15s %-10s", "NAME", "SOURCE", "SIZE"))
-            print(String(repeating: "-", count: 75))
+            moxPrint("Installed models:")
+            moxPrint(String(format: "%-50s %-15s %-10s", "NAME", "SOURCE", "SIZE"))
+            moxPrint(String(repeating: "-", count: 75))
 
             for model in models {
                 let name = model.name.count > 48 ? String(model.name.prefix(45)) + "..." : model.name
-                print(String(format: "%-50s %-15s %-10s", name, model.source.rawValue, model.sizeDescription))
+                moxPrint(String(format: "%-50s %-15s %-10s", name, model.source.rawValue, model.sizeDescription))
             }
         } catch {
-            print("Error listing models: \(error.localizedDescription)")
+            moxStderr("Error listing models: \(error.localizedDescription)")
         }
     }
 
@@ -192,34 +192,34 @@ struct MoxCLI {
         // they diverge from values persisted in `~/.mox/config.json`.
         _ = (hostOverridden, portOverridden)
         guard let id = modelId else {
-            print("Error: Model ID required")
-            print("Usage: mox run <model-id> [--port 8080]")
+            moxPrint("Error: Model ID required")
+            moxStderr("Usage: mox run <model-id> [--port 8080]")
             return
         }
 
         let modelManager = ModelManager.shared
 
         guard let modelInfo = try? await modelManager.modelInfo(for: id) else {
-            print("Model '\(id)' not found. Run 'mox pull \(id)' first.")
+            moxPrint("Model '\(id)' not found. Run 'mox pull \(id)' first.")
             return
         }
 
         let memoryGuard = MemoryGuard.shared
         let memoryStatus = memoryGuard.getMemoryStatus()
 
-        print("Memory status: \(String(format: "%.1f", memoryStatus.availableGB)) GB available")
+        moxPrint("Memory status: \(String(format: "%.1f", memoryStatus.availableGB)) GB available")
 
         if !memoryStatus.canAllocate {
-            print("Warning: Low memory. Model may fail to load.")
+            moxPrint("Warning: Low memory. Model may fail to load.")
         }
 
-        print("Starting server for model: \(modelInfo.name)")
-        print("API available at: http://\(host):\(port)")
+        moxPrint("Starting server for model: \(modelInfo.name)")
+        moxPrint("API available at: http://\(host):\(port)")
 
         let server = MoxServer(host: host, port: port)
         try server.start()
 
-        print("Server is running. Press Ctrl+C to stop.")
+        moxPrint("Server is running. Press Ctrl+C to stop.")
 
         try await Task.sleep(nanoseconds: UInt64.max)
     }
@@ -237,29 +237,29 @@ struct MoxCLI {
         }
 
         guard let id = modelId else {
-            print("Error: Model ID required")
-            print("Usage: mox chat <model-id>")
+            moxPrint("Error: Model ID required")
+            moxStderr("Usage: mox chat <model-id>")
             return
         }
 
         let modelManager = ModelManager.shared
 
         guard let modelInfo = try? await modelManager.modelInfo(for: id) else {
-            print("Model '\(id)' not found. Run 'mox pull \(id)' first.")
+            moxPrint("Model '\(id)' not found. Run 'mox pull \(id)' first.")
             return
         }
 
         let runner = ModelRunner.shared
 
         // Banner — printed before the first prompt so the user sees model + commands.
-        print("mox chat — \(modelInfo.name)")
-        print("type /help for commands, /exit to quit")
+        moxPrint("mox chat — \(modelInfo.name)")
+        moxPrint("type /help for commands, /exit to quit")
 
         var messages: [ChatMessage] = []
 
         // REPL loop. readLine returns nil on EOF (Ctrl+D / closed pipe) — exit silently.
         while true {
-            print("> ", terminator: "")
+            moxPrint("> ", terminator: "")
             guard let line = readLine(strippingNewline: true) else {
                 break
             }
@@ -274,10 +274,10 @@ struct MoxCLI {
                 return
             case "/clear":
                 messages.removeAll()
-                print("(conversation cleared)")
+                moxPrint("(conversation cleared)")
                 continue
             case "/help":
-                print("""
+                moxPrint("""
                 Commands:
                   /exit, /quit   End the session
                   /clear         Clear conversation history
@@ -300,12 +300,12 @@ struct MoxCLI {
 
                 if let content = response.choices.first?.message.content {
                     messages.append(ChatMessage(role: "assistant", content: content))
-                    print("\n\(content)")
+                    moxPrint("\n\(content)")
                 }
 
                 let usage = response.usage
-                print("[tokens prompt=\(usage.promptTokens) completion=\(usage.completionTokens) total=\(usage.totalTokens)]")
-                print("")
+                moxPrint("[tokens prompt=\(usage.promptTokens) completion=\(usage.completionTokens) total=\(usage.totalTokens)]")
+                moxPrint("")
             } catch {
                 // Pop the user message we just appended so a failed turn doesn't
                 // poison subsequent context, but keep the REPL alive so the user
@@ -313,8 +313,8 @@ struct MoxCLI {
                 if !messages.isEmpty {
                     messages.removeLast()
                 }
-                print("Error: \(error.localizedDescription)")
-                print("")
+                moxStderr("Error: \(error.localizedDescription)")
+                moxPrint("")
             }
         }
     }
@@ -417,7 +417,7 @@ struct MoxCLI {
                 ]
             )
             if let data = try? encoder.encode(chunk), let line = String(data: data, encoding: .utf8) {
-                print(line)
+                moxPrint(line)
             }
 
             for await piece in await runner.chatStream(
@@ -441,7 +441,7 @@ struct MoxCLI {
                     ]
                 )
                 if let data = try? encoder.encode(payload), let line = String(data: data, encoding: .utf8) {
-                    print(line)
+                    moxPrint(line)
                 }
             }
 
@@ -461,7 +461,7 @@ struct MoxCLI {
                 ]
             )
             if let data = try? encoder.encode(stop), let line = String(data: data, encoding: .utf8) {
-                print(line)
+                moxPrint(line)
             }
             return
         }
@@ -484,8 +484,8 @@ struct MoxCLI {
 
     static func handleDelete(args: [String]) async throws {
         guard args.count > 0 else {
-            print("Error: Model ID required")
-            print("Usage: mox delete <model-id>")
+            moxPrint("Error: Model ID required")
+            moxStderr("Usage: mox delete <model-id>")
             return
         }
 
@@ -493,18 +493,18 @@ struct MoxCLI {
         let modelManager = ModelManager.shared
 
         guard let modelInfo = try? await modelManager.modelInfo(for: modelId) else {
-            print("Model '\(modelId)' not found.")
+            moxPrint("Model '\(modelId)' not found.")
             return
         }
 
-        print("Deleting model: \(modelInfo.name)")
-        print("This will remove all files from: \(modelInfo.path)")
+        moxPrint("Deleting model: \(modelInfo.name)")
+        moxPrint("This will remove all files from: \(modelInfo.path)")
 
         do {
             try await modelManager.deleteModel(id: modelId)
-            print("Successfully deleted model: \(modelId)")
+            moxPrint("Successfully deleted model: \(modelId)")
         } catch {
-            print("Error deleting model: \(error.localizedDescription)")
+            moxStderr("Error deleting model: \(error.localizedDescription)")
         }
     }
 
@@ -527,7 +527,7 @@ struct MoxCLI {
     }
 
     static func printDebugHelp() {
-        print("""
+        moxPrint("""
         mox debug — developer utilities
 
         Subcommands:
@@ -551,7 +551,7 @@ struct MoxCLI {
         let sub = args.first ?? "help"
         let path = conversationsDBPath()
         guard FileManager.default.fileExists(atPath: path) else {
-            print("No conversations.db at \(path)")
+            moxPrint("No conversations.db at \(path)")
             return
         }
         switch sub {
@@ -562,21 +562,31 @@ struct MoxCLI {
                 "SELECT id, substr(title, 1, 40), model_id, datetime(updated_at, 'unixepoch') FROM conversations ORDER BY updated_at DESC LIMIT 20;",
                 ".quit"])
         case "dump":
-            guard args.count >= 2 else { print("Usage: mox debug db dump <conv-id>"); return }
+            guard args.count >= 2 else { moxStderr("Usage: mox debug db dump <conv-id>"); return }
+            // Escape single quotes per SQL standard ('' for one literal ').
+            // This is a dev tool but the DB is the user's live data.
+            let cid = args[1].replacingOccurrences(of: "'", with: "''")
             runShell("/usr/bin/sqlite3", ["-header", "-column", path,
-                "SELECT role, datetime(created_at, 'unixepoch'), substr(content, 1, 200) FROM messages WHERE conversation_id = '\(args[1])' ORDER BY created_at;",
+                "SELECT role, datetime(created_at, 'unixepoch'), substr(content, 1, 200) FROM messages WHERE conversation_id = '\(cid)' ORDER BY created_at;",
                 ".quit"])
         case "search":
-            guard args.count >= 2 else { print("Usage: mox debug db search <query>"); return }
-            let q = args.dropFirst().joined(separator: " ")
+            guard args.count >= 2 else { moxStderr("Usage: mox debug db search <query>"); return }
+            // Escape both single quotes (SQL string) and % _ \ (LIKE wildcards)
+            // so a query for "100%" doesn't match everything.
+            let qRaw = args.dropFirst().joined(separator: " ")
+            let qSql = qRaw.replacingOccurrences(of: "'", with: "''")
+            let qLike = qSql
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "%", with: "\\%")
+                .replacingOccurrences(of: "_", with: "\\_")
             runShell("/usr/bin/sqlite3", ["-header", "-column", path,
-                "SELECT m.conversation_id, m.role, substr(m.content, 1, 200) FROM messages m WHERE m.content LIKE '%\(q)%' ORDER BY m.created_at DESC LIMIT 20;",
+                "SELECT m.conversation_id, m.role, substr(m.content, 1, 200) FROM messages m WHERE m.content LIKE '%\(qLike)%' ESCAPE '\\' ORDER BY m.created_at DESC LIMIT 20;",
                 ".quit"])
         case "shell":
             runShell("/usr/bin/sqlite3", [path])
         default:
-            print("Unknown db subcommand: \(sub)")
-            print("Try: schema | list | dump <id> | search <q> | shell")
+            moxPrint("Unknown db subcommand: \(sub)")
+            moxPrint("Try: schema | list | dump <id> | search <q> | shell")
         }
     }
 
@@ -587,17 +597,17 @@ struct MoxCLI {
         do {
             models = try await ModelManager.shared.listModels()
         } catch {
-            print("Error: \(error.localizedDescription)")
+            moxStderr("Error: \(error.localizedDescription)")
             return
         }
         if models.isEmpty {
-            print("No models installed.")
+            moxPrint("No models installed.")
             return
         }
-        print(String(format: "%-50s %-15s %10s", "ID", "SOURCE", "SIZE"))
-        print(String(repeating: "-", count: 80))
+        moxPrint(String(format: "%-50s %-15s %10s", "ID", "SOURCE", "SIZE"))
+        moxPrint(String(repeating: "-", count: 80))
         for m in models {
-            print(String(format: "%-50s %-15s %10s", m.id, m.source.rawValue, m.sizeDescription))
+            moxPrint(String(format: "%-50s %-15s %10s", m.id, m.source.rawValue, m.sizeDescription))
         }
     }
 
@@ -615,12 +625,12 @@ struct MoxCLI {
             let lines = out.split(separator: "\n")
             if let line = lines.first(where: { $0.contains("com.mox.server") }) {
                 let pid = line.split(separator: "\t").first ?? "-"
-                print("com.mox.server: loaded (PID \(pid))")
+                moxPrint("com.mox.server: loaded (PID \(pid))")
             } else {
-                print("com.mox.server: not loaded")
+                moxPrint("com.mox.server: not loaded")
             }
         } catch {
-            print("Error: \(error.localizedDescription)")
+            moxStderr("Error: \(error.localizedDescription)")
         }
     }
 
@@ -631,7 +641,7 @@ struct MoxCLI {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch {
-            print("Error: \(error.localizedDescription)")
+            moxStderr("Error: \(error.localizedDescription)")
         }
     }
 
@@ -643,7 +653,7 @@ struct MoxCLI {
             try proc.run()
             proc.waitUntilExit()
         } catch {
-            print("Failed to run \(exe): \(error.localizedDescription)")
+            moxPrint("Failed to run \(exe): \(error.localizedDescription)")
         }
     }
 }

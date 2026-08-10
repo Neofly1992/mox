@@ -140,9 +140,17 @@ final class AppState: ObservableObject {
         temperature = config.defaults.temperature
 
         let baseURLString = "http://\(serverHost):\(serverPort)"
-        guard let url = URL(string: baseURLString) else {
-            startupError = "Invalid server URL: \(baseURLString)"
-            return
+        let url: URL
+        if let parsed = URL(string: baseURLString) {
+            url = parsed
+        } else {
+            // Malformed config: log it, fall back to localhost defaults,
+            // and continue so the user has a recoverable state in the
+            // Settings tab instead of a dead-end blank window.
+            moxGUILog.error("invalid server URL \(baseURLString, privacy: .public); using 127.0.0.1:11555")
+            url = URL(string: "http://127.0.0.1:11555")!
+            serverHost = "127.0.0.1"
+            serverPort = 11555
         }
 
         // 2. Probe. Three-way branch.

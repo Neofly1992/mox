@@ -615,12 +615,19 @@ struct MoxCLI {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         proc.arguments = ["list"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        // Drain stderr on a background task so the child can't block on
+        // a full pipe if `launchctl` is chatty on the error path.
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let _ = handle.availableData
+        }
         do {
             try proc.run()
             proc.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             guard let out = String(data: data, encoding: .utf8) else { return }
             let lines = out.split(separator: "\n")
             if let line = lines.first(where: { $0.contains("com.mox.server") }) {
@@ -628,6 +635,10 @@ struct MoxCLI {
                 moxPrint("com.mox.server: loaded (PID \(pid))")
             } else {
                 moxPrint("com.mox.server: not loaded")
+                if proc.terminationStatus != 0 {
+                    let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    if !err.isEmpty { moxStderr("(launchctl exit \(proc.terminationStatus)): \(err)") }
+                }
             }
         } catch {
             moxStderr("Error: \(error.localizedDescription)")

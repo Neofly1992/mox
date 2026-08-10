@@ -1,4 +1,7 @@
-// v0.3 ships the GUI as a bare executable launched with `swift run mox-gui`.
+import AppKit
+import MoxGUIClient
+import MoxShared
+import SwiftUI
 //
 // The proper macOS .app bundle (Info.plist, code signing, sandbox
 // entitlements, Hardened Runtime, notarization) is a v0.5 concern — adding
@@ -8,9 +11,6 @@
 // status bar registration paths, mode-detection dialog, and Settings tab
 // in v0.3.
 
-import MoxGUIClient
-import MoxShared
-import SwiftUI
 
 @main
 struct MoxApp: App {
@@ -109,7 +109,7 @@ final class AppState: ObservableObject {
     /// The client the GUI uses. Concrete type is injected at bootstrap based
     /// on whether a daemon was reachable; we keep the protocol type here so
     /// the rest of the app doesn't need a switch.
-    private(set) var client: MoxAPIClient?
+    @Published private(set) var client: MoxAPIClient?
 
     /// Configured at bootstrap. Only constructed when we actually land in
     /// `.daemon` mode; nil in temporary mode and during the dialog.
@@ -227,10 +227,12 @@ final class AppState: ObservableObject {
     /// background-only use case, so exiting the process is the cleanest way
     /// to honour the intent.
     func cancel() {
-        // Reset state so any observer-side cleanup is in a known state, then
-        // exit. Don't trigger any other async work — we're done.
+        // Reset observable state so any view-side cleanup is in a known
+        // state. Then ask AppKit to terminate — this lets SwiftUI run its
+        // teardown hooks and gives any future v0.5 session-save logic a
+        // chance to fire. `exit(0)` would skip all of that.
         showDaemonDialog = false
-        exit(0)
+        NSApplication.shared.terminate(nil)
     }
 
     // MARK: - Settings-driven mode change
@@ -320,10 +322,18 @@ final class AppState: ObservableObject {
     private func loadModels() async {
         do {
             models = try await client?.listModels() ?? []
+            // Success: clear any previous listModels error.
+            if startupError?.hasPrefix("Failed to list models:") == true {
+                startupError = nil
+            }
         } catch {
-            // Listing failure isn't fatal — the GUI can still render; just
-            // surface the empty state.
+            // Listing failure is distinct from "no models installed" — the
+            // empty state copy is the same, but the Models tab now has an
+            // actionable hint instead of silently appearing empty.
             models = []
+            let message = "Failed to list models: \(error.localizedDescription). Daemon is running but `mox list` failed; see Debug → Models for details."
+            startupError = message
+            moxGUILog.error("listModels failed: \(String(describing: error), privacy: .public)")
         }
     }
 

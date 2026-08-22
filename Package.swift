@@ -1,10 +1,10 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 import PackageDescription
 
 let package = Package(
     name: "mox",
     platforms: [
-        .macOS(.v14),
+        .macOS(.v15),
         .iOS(.v17)
     ],
     products: [
@@ -14,10 +14,12 @@ let package = Package(
         .library(name: "MoxGUIClient", targets: ["MoxGUIClient"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.10.0"),
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.68.0"),
-        .package(url: "https://github.com/ml-explore/mlx-swift-examples.git", from: "2.25.4"),
-        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.0"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.0"),
+        .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.9.0"),
+        .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.0"),
+        .package(url: "https://github.com/swiftlang/swift-testing.git", from: "0.10.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.101.0"),
     ],
     targets: [
         .target(
@@ -28,10 +30,25 @@ let package = Package(
             name: "MoxCore",
             dependencies: [
                 "MoxShared",
+                "MoxConvertCore",
                 .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXLLM", package: "mlx-swift-examples"),
-                .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
-                .product(name: "Hub", package: "swift-transformers"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+            ]
+        ),
+        .target(
+            name: "MoxConvertCore",
+            dependencies: [
+                "MoxShared",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ]
         ),
@@ -53,6 +70,7 @@ let package = Package(
             name: "MoxCLI",
             dependencies: [
                 "MoxCore",
+                "MoxConvertCore",
                 "MoxServer",
                 "MoxShared",
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -72,11 +90,21 @@ let package = Package(
         ),
         .testTarget(
             name: "MoxCoreTests",
-            dependencies: ["MoxCore", "MoxShared", "MoxServer"]
+            dependencies: [
+                "MoxCore",
+                "MoxConvertCore",
+                .product(name: "Testing", package: "swift-testing"),
+                "MoxShared",
+                "MoxServer"
+            ]
         ),
         .testTarget(
             name: "MoxGUIClientTests",
-            dependencies: ["MoxGUIClient", "MoxShared"]
+            dependencies: [
+                "MoxGUIClient",
+                .product(name: "Testing", package: "swift-testing"),
+                "MoxShared"
+            ]
         ),
      ]
 )

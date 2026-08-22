@@ -1,5 +1,153 @@
 import Foundation
 
+/// `echo`, `logprobs`, `best_of`, `suffix` are decoded for round-trip
+/// stability but otherwise ignored by the resolver.
+public struct CompletionRequest: Codable, Sendable {
+    public let model: String
+    public let prompt: String
+    public let maxTokens: Int?
+    public let temperature: Double?
+    public let topP: Double?
+    public let stream: Bool?
+    public let streamOptions: ChatStreamOptions?
+    public let echo: Bool?
+    public let logprobs: Int?
+    public let bestOf: Int?
+    public let suffix: String?
+
+    enum CodingKeys: String, CodingKey {
+        case model, prompt, stream, echo, logprobs, suffix
+        case maxTokens = "max_tokens"
+        case temperature
+        case topP = "top_p"
+        case streamOptions = "stream_options"
+        case bestOf = "best_of"
+    }
+
+    public init(
+        model: String,
+        prompt: String,
+        maxTokens: Int? = nil,
+        temperature: Double? = nil,
+        topP: Double? = nil,
+        stream: Bool? = nil,
+        streamOptions: ChatStreamOptions? = nil,
+        echo: Bool? = nil,
+        logprobs: Int? = nil,
+        bestOf: Int? = nil,
+        suffix: String? = nil
+    ) {
+        self.model = model
+        self.prompt = prompt
+        self.maxTokens = maxTokens
+        self.temperature = temperature
+        self.topP = topP
+        self.stream = stream
+        self.streamOptions = streamOptions
+        self.echo = echo
+        self.logprobs = logprobs
+        self.bestOf = bestOf
+        self.suffix = suffix
+    }
+}
+
+/// OpenAI legacy completions non-stream response. `object` is fixed to
+/// `"text_completion"` per the wire contract.
+public struct CompletionResponse: Codable, Sendable {
+    public let id: String
+    public let object: String
+    public let created: Int64
+    public let model: String
+    public let choices: [Choice]
+    public let usage: ChatCompletionResponse.Usage
+
+    enum CodingKeys: String, CodingKey {
+        case id, object, created, model, choices, usage
+    }
+
+    public init(
+        id: String,
+        object: String = "text_completion",
+        created: Int64,
+        model: String,
+        choices: [Choice],
+        usage: ChatCompletionResponse.Usage
+    ) {
+        self.id = id
+        self.object = object
+        self.created = created
+        self.model = model
+        self.choices = choices
+        self.usage = usage
+    }
+
+    public struct Choice: Codable, Sendable {
+        public let index: Int
+        public let text: String
+        public let finishReason: String
+
+        enum CodingKeys: String, CodingKey {
+            case index, text
+            case finishReason = "finish_reason"
+        }
+
+        public init(index: Int, text: String, finishReason: String) {
+            self.index = index
+            self.text = text
+            self.finishReason = finishReason
+        }
+    }
+}
+
+/// OpenAI legacy completions streaming chunk. `object` is fixed to
+/// `"text_completion"` and `text_completion` per the wire contract.
+public struct CompletionChunk: Codable, Sendable {
+    public let id: String
+    public let object: String
+    public let created: Int64
+    public let model: String
+    public let choices: [Choice]
+    public let usage: ChatCompletionChunk.Usage?
+
+    enum CodingKeys: String, CodingKey {
+        case id, object, created, model, choices, usage
+    }
+
+    public struct Choice: Codable, Sendable {
+        public let index: Int
+        public let text: String
+        public let finishReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case index, text
+            case finishReason = "finish_reason"
+        }
+
+        public init(index: Int, text: String, finishReason: String?) {
+            self.index = index
+            self.text = text
+            self.finishReason = finishReason
+        }
+    }
+
+    public init(
+        id: String,
+        object: String = "text_completion",
+        created: Int64,
+        model: String,
+        choices: [Choice],
+        usage: ChatCompletionChunk.Usage? = nil
+    ) {
+        self.id = id
+        self.object = object
+        self.created = created
+        self.model = model
+        self.choices = choices
+        self.usage = usage
+    }
+}
+
+
 public enum ModelSource: String, Codable, Sendable, CaseIterable {
     case huggingface = "huggingface"
     case modelscope = "modelscope"
@@ -36,6 +184,53 @@ public struct ModelInfo: Codable, Identifiable, Sendable {
 }
 
 /// On-disk manifest written to each model directory under `mox.json` after a
+/// v0.8 compatibility classification for an installed model. The probe
+/// inspects config.json + tokenizer + chat template to determine which
+/// upstream architectures mox can run unchanged. Modelled after MTPLX's
+/// verified / architecture-compatible / AR-only / incompatible ladder but
+/// flattened — mox doesn't ship a curated "verified" list (MIT, no
+/// vendor catalog).
+public enum CompatibilityTier: String, Codable, Sendable, Equatable {
+    /// mlx-swift-lm ships a first-class `ModelType` for this architecture.
+    case mlxBuiltin
+    /// mlx-swift-lm has a path but with reduced confidence (community
+    /// port, archived model). Loads but labelled.
+    case communityUnverified
+    /// mox can only run this as a target-only AR generation; no
+    /// speculative-decoding path, no prefix cache, no tool parser.
+    case arOnly
+    /// The architecture is recognised by config.json but mlx-swift-lm
+    /// has no matching `ModelType` — refuse to load.
+    case incompatible
+    /// The probe could not decide. Surface as "unknown", never silently
+    /// downgrade.
+    case unknown
+}
+
+
+
+public struct ModelCompatibility: Codable, Sendable, Equatable {
+    public let tier: CompatibilityTier
+    /// Human-readable reason — model_type observed, missing fields, etc.
+    /// Persisted so `mox list --check` can show it without re-probing.
+    public let reason: String?
+    public let modelType: String?
+    public let probedAt: Date
+
+    public init(
+        tier: CompatibilityTier,
+        reason: String? = nil,
+        modelType: String? = nil,
+        probedAt: Date = Date()
+    ) {
+        self.tier = tier
+        self.reason = reason
+        self.modelType = modelType
+        self.probedAt = probedAt
+    }
+}
+
+/// On-disk manifest written to each model directory under `mox.json` after a
 /// successful pull. Records the canonical model id, the source, the originally
 /// requested id, and the install timestamp. The manifest is the source of
 /// truth for `source` so that callers never have to reverse-engineer it from
@@ -45,12 +240,47 @@ public struct ModelManifest: Codable, Sendable {
     public var source: ModelSource
     public var originalId: String
     public var installedAt: Date
+    /// v0.5+ — what was the upstream's weight format? Drives `mox list`
+    /// and the future `mox convert` routing.
+    public var sourceFormat: String?
+    /// v0.5+ — populated when Mox did the quantization itself (e.g.
+    /// `requantize`); nil for upstream-quantized or bf16 models.
+    public var quantization: MoxQuantizationInfo?
+    /// v0.8+ — compatibility tier observed when the manifest was last
+    /// written. Re-probed at load time; mismatch is reported, not
+    /// silently overridden.
+    public var compatibility: ModelCompatibility?
 
-    public init(id: String, source: ModelSource, originalId: String, installedAt: Date = Date()) {
+    public init(
+        id: String,
+        source: ModelSource,
+        originalId: String,
+        installedAt: Date = Date(),
+        sourceFormat: String? = nil,
+        quantization: MoxQuantizationInfo? = nil,
+        compatibility: ModelCompatibility? = nil
+    ) {
         self.id = id
         self.source = source
         self.originalId = originalId
         self.installedAt = installedAt
+        self.sourceFormat = sourceFormat
+        self.quantization = quantization
+        self.compatibility = compatibility
+    }
+}
+
+public struct MoxQuantizationInfo: Codable, Sendable {
+    public let bits: Int
+    public let groupSize: Int
+    public let mode: String
+    public let appliedAt: Date
+
+    public init(bits: Int, groupSize: Int, mode: String, appliedAt: Date = Date()) {
+        self.bits = bits
+        self.groupSize = groupSize
+        self.mode = mode
+        self.appliedAt = appliedAt
     }
 }
 
@@ -110,14 +340,73 @@ public struct ChatCompletionRequest: Codable, Sendable {
     public let temperature: Double?
     public let topP: Double?
     public let stream: Bool?
-    
-    public init(model: String, messages: [ChatMessage], maxTokens: Int? = nil, temperature: Double? = nil, topP: Double? = nil, stream: Bool? = nil) {
+    public let streamOptions: ChatStreamOptions?
+    /// v0.8+ — OpenAI tool definitions. Decoded as opaque `AnyCodable`
+    /// so we don't need to version every client schema; the resolver
+    /// validates `name` is non-empty.
+    public let tools: [AnyCodable]?
+
+    enum CodingKeys: String, CodingKey {
+        case model, messages, stream, tools
+        case maxTokens = "max_tokens"
+        case temperature
+        case topP = "top_p"
+        case streamOptions = "stream_options"
+    }
+
+    public init(
+        model: String,
+        messages: [ChatMessage],
+        maxTokens: Int? = nil,
+        temperature: Double? = nil,
+        topP: Double? = nil,
+        stream: Bool? = nil,
+        streamOptions: ChatStreamOptions? = nil,
+        tools: [AnyCodable]? = nil
+    ) {
         self.model = model
         self.messages = messages
         self.maxTokens = maxTokens
         self.temperature = temperature
         self.topP = topP
         self.stream = stream
+        self.streamOptions = streamOptions
+        self.tools = tools
+    }
+}
+
+public struct ChatStreamOptions: Codable, Sendable {
+    public let includeUsage: Bool?
+    enum CodingKeys: String, CodingKey {
+        case includeUsage = "include_usage"
+    }
+    public init(includeUsage: Bool? = nil) {
+        self.includeUsage = includeUsage
+    }
+}
+
+/// OpenAI-shape `tool_calls` array element on an assistant message.
+public struct OpenAIToolCall: Codable, Sendable, Equatable {
+    public let index: Int?
+    public let id: String?
+    public let type: String?
+    public let function: Function
+
+    public struct Function: Codable, Sendable, Equatable {
+        public let name: String?
+        public let arguments: String?
+
+        public init(name: String? = nil, arguments: String? = nil) {
+            self.name = name
+            self.arguments = arguments
+        }
+    }
+
+    public init(index: Int? = nil, id: String? = nil, type: String? = nil, function: Function) {
+        self.index = index
+        self.id = id
+        self.type = type
+        self.function = function
     }
 }
 
@@ -162,10 +451,23 @@ public struct ChatCompletionResponse: Codable, Sendable {
     public struct AssistantMessage: Codable, Sendable {
         public let role: String
         public let content: String
-        
-        public init(role: String = "assistant", content: String) {
+        /// v0.8+ — populated when the model emitted tool calls instead of
+        /// (or in addition to) free-form content.
+        public let toolCalls: [OpenAIToolCall]?
+
+        enum CodingKeys: String, CodingKey {
+            case role, content
+            case toolCalls = "tool_calls"
+        }
+
+        public init(
+            role: String = "assistant",
+            content: String,
+            toolCalls: [OpenAIToolCall]? = nil
+        ) {
             self.role = role
             self.content = content
+            self.toolCalls = toolCalls
         }
     }
     
@@ -189,14 +491,20 @@ public struct ChatCompletionResponse: Codable, Sendable {
 }
 
 /// OpenAI-compatible streaming chunk. One document per line on the wire; the
-/// HTTP daemon's eventual SSE endpoint will emit the same shape, so the CLI
-/// subcommand and the GUI client agree on format from day one.
+/// SSE endpoint emits the same shape so the CLI subcommand and the GUI
+/// client agree on format. `usage` is only populated on the trailing chunk
+/// when the client set `stream_options.include_usage`.
 public struct ChatCompletionChunk: Codable, Sendable {
     public let id: String
     public let object: String
     public let created: Int64
     public let model: String
     public let choices: [Choice]
+    public let usage: Usage?
+
+    enum CodingKeys: String, CodingKey {
+        case id, object, created, model, choices, usage
+    }
 
     public struct Choice: Codable, Sendable {
         public let index: Int
@@ -225,25 +533,40 @@ public struct ChatCompletionChunk: Codable, Sendable {
         }
     }
 
-    public init(id: String, object: String, created: Int64, model: String, choices: [Choice]) {
+    public struct Usage: Codable, Sendable {
+        public let promptTokens: Int
+        public let completionTokens: Int
+        public let totalTokens: Int
+
+        enum CodingKeys: String, CodingKey {
+            case promptTokens = "prompt_tokens"
+            case completionTokens = "completion_tokens"
+            case totalTokens = "total_tokens"
+        }
+
+        public init(promptTokens: Int, completionTokens: Int, totalTokens: Int) {
+            self.promptTokens = promptTokens
+            self.completionTokens = completionTokens
+            self.totalTokens = totalTokens
+        }
+    }
+
+    public init(
+        id: String,
+        object: String,
+        created: Int64,
+        model: String,
+        choices: [Choice],
+        usage: Usage? = nil
+    ) {
         self.id = id
         self.object = object
         self.created = created
         self.model = model
         self.choices = choices
+        self.usage = usage
     }
 }
-
-public protocol ModelSourceResolver: Sendable {
-    var name: String { get }
-    func resolveModelId(_ id: String) -> String
-    func downloadURL(for modelId: String) -> URL?
-    /// Validate that any configured mirror host is on this source's allowlist.
-    /// Throws `MirrorError.invalidMirror` if a mirror is set to a non-allowed host.
-    func validateMirror() throws
-}
-
-/// Error raised when a configured mirror host is not on the source's allowlist.
 /// Lives in `MoxShared` (rather than `ModelError` in `MoxCore`) so the resolver
 /// protocol can throw it without a back-dependency.
 public enum MirrorError: Error, LocalizedError {
@@ -268,6 +591,15 @@ public enum HuggingFaceMirrorPolicy {
 public enum ModelScopeMirrorPolicy {
     public static let allowedHosts: Set<String> = ["modelscope.cn"]
 }
+public protocol ModelSourceResolver: Sendable {
+    var name: String { get }
+    func resolveModelId(_ id: String) -> String
+    func downloadURL(for modelId: String) -> URL?
+    /// Validate that any configured mirror host is on this source's allowlist.
+    /// Throws `MirrorError.invalidMirror` if a mirror is set to a non-allowed host.
+    func validateMirror() throws
+}
+
 
 public struct HuggingFaceSource: ModelSourceResolver, Sendable {
     public let name = "huggingface"
@@ -395,4 +727,366 @@ public struct DownloadProgress: Sendable {
 
 public protocol DownloadProgressObserver: AnyObject, Sendable {
     func downloadProgressUpdated(_ progress: DownloadProgress)
+}
+
+// MARK: - Anthropic Messages API
+
+/// Anthropic Messages API request shape. Mirrors the official Anthropic
+/// SDK's `MessageCreateParams` (text-only subset). v0.4.1 does not support
+/// `tools` — those requests return 400 from the handler. `system` accepts
+/// either a plain string or a single text content block (the latter is
+/// normalised to a string before being forwarded to the model).
+public struct AnthropicMessagesRequest: Codable, Sendable {
+    public let model: String
+    public let messages: [AnthropicMessage]
+    public let system: AnthropicSystemContent?
+    public let maxTokens: Int
+    public let temperature: Double?
+    public let topP: Double?
+    public let stream: Bool?
+    /// Reserved — v0.4.1 returns 400 if any tool is supplied.
+    public let tools: [AnthropicTool]?
+
+    enum CodingKeys: String, CodingKey {
+        case model, messages, system, stream, tools
+        case maxTokens = "max_tokens"
+        case temperature
+        case topP = "top_p"
+    }
+
+    public init(
+        model: String,
+        messages: [AnthropicMessage],
+        system: AnthropicSystemContent? = nil,
+        maxTokens: Int,
+        temperature: Double? = nil,
+        topP: Double? = nil,
+        stream: Bool? = nil,
+        tools: [AnthropicTool]? = nil
+    ) {
+        self.model = model
+        self.messages = messages
+        self.system = system
+        self.maxTokens = maxTokens
+        self.temperature = temperature
+        self.topP = topP
+        self.stream = stream
+        self.tools = tools
+    }
+}
+
+public struct AnthropicMessage: Codable, Sendable {
+    public let role: String
+    public let content: AnthropicMessageContent
+    public init(role: String, content: AnthropicMessageContent) {
+        self.role = role
+        self.content = content
+    }
+}
+
+/// Anthropic accepts either a plain text string or an array of content
+/// blocks. Mox only handles text blocks; images/tool_use/tool_result blocks
+/// are decoded but treated as opaque text (their JSON is preserved so we
+/// can detect unsupported requests and 400 them).
+public enum AnthropicMessageContent: Codable, Sendable {
+    case text(String)
+    case blocks([AnthropicContentBlock])
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            self = .text(s); return
+        }
+        let blocks = try container.decode([AnthropicContentBlock].self)
+        self = .blocks(blocks)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .text(let s): try container.encode(s)
+        case .blocks(let b): try container.encode(b)
+        }
+    }
+
+    /// Flatten to plain text for forwarding to the model.
+    public var flattenedText: String {
+        switch self {
+        case .text(let s): return s
+        case .blocks(let blocks):
+            return blocks.compactMap { block -> String? in
+                if case .text(let s) = block { return s }
+                return nil
+            }.joined(separator: "\n")
+        }
+    }
+}
+
+public enum AnthropicContentBlock: Codable, Sendable {
+    case text(String)
+    case other(type: String, raw: [String: AnyCodable])
+
+    private enum CodingKeys: String, CodingKey { case type, text }
+
+    public init(from decoder: Decoder) throws {
+        // Decode the entire block as free-form AnyCodable so we preserve
+        // unknown block shapes (image, tool_use, …) verbatim and the
+        // handler can decide whether to 400.
+        let any = try AnyCodable(from: decoder)
+        guard case .object(let raw) = any else {
+            throw DecodingError.dataCorruptedError(
+                in: try decoder.singleValueContainer(),
+                debugDescription: "AnthropicContentBlock expected object"
+            )
+        }
+        let type = raw["type"]?.stringValue ?? ""
+        if type == "text", let text = raw["text"]?.stringValue {
+            self = .text(text)
+        } else {
+            self = .other(type: type, raw: raw)
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        // Emit a single value (object) so AnyCodable's `encode(to:)` writes
+        // the full dictionary verbatim — including any "other" shape.
+        let obj: AnyCodable
+        switch self {
+        case .text(let s):
+            obj = .object(["type": .string("text"), "text": .string(s)])
+        case .other(_, let raw):
+            obj = .object(raw)
+        }
+        try obj.encode(to: encoder)
+    }
+}
+
+extension AnthropicContentBlock {
+    /// Convenience for downstream callers that only care about text.
+    public var flattenedText: String? {
+        if case .text(let s) = self { return s }
+        return nil
+    }
+}
+
+public enum AnthropicSystemContent: Codable, Sendable {
+    case text(String)
+    case blocks([AnthropicContentBlock])
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            self = .text(s); return
+        }
+        let blocks = try container.decode([AnthropicContentBlock].self)
+        self = .blocks(blocks)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .text(let s): try container.encode(s)
+        case .blocks(let b): try container.encode(b)
+        }
+    }
+
+    public var flattenedText: String? {
+        switch self {
+        case .text(let s): return s
+        case .blocks(let blocks):
+            let texts = blocks.compactMap { b -> String? in
+                if case .text(let s) = b { return s }
+                return nil
+            }
+            return texts.isEmpty ? nil : texts.joined(separator: "\n")
+        }
+    }
+}
+
+/// Reserved for `tools[]` — v0.4.1 always rejects. We decode the shape
+/// only so a malformed tool definition produces a structured 400 instead
+/// of a parse error.
+public struct AnthropicTool: Codable, Sendable {
+    public let name: String
+    public let description: String?
+    public let inputSchema: AnyCodable
+    enum CodingKeys: String, CodingKey {
+        case name, description
+        case inputSchema = "input_schema"
+    }
+    public init(name: String, description: String?, inputSchema: AnyCodable) {
+        self.name = name
+        self.description = description
+        self.inputSchema = inputSchema
+    }
+}
+
+/// Anthropic non-streaming response. Wire shape:
+/// ```json
+/// {
+///   "id": "msg_...",
+///   "type": "message",
+///   "role": "assistant",
+///   "content": [{"type":"text","text":"..."}],
+///   "model": "...",
+///   "stop_reason": "end_turn",
+///   "usage": {"input_tokens":N,"output_tokens":M}
+/// }
+/// ```
+public struct AnthropicMessagesResponse: Codable, Sendable {
+    public let id: String
+    public let type: String
+    public let role: String
+    public let content: [AnthropicContentBlock]
+    public let model: String
+    public let stopReason: String?
+    public let stopSequence: String?
+    public let usage: AnthropicUsage
+
+    enum CodingKeys: String, CodingKey {
+        case id, type, role, content, model, usage
+        case stopReason = "stop_reason"
+        case stopSequence = "stop_sequence"
+    }
+
+    public init(
+        id: String,
+        type: String = "message",
+        role: String = "assistant",
+        content: [AnthropicContentBlock],
+        model: String,
+        stopReason: String? = nil,
+        stopSequence: String? = nil,
+        usage: AnthropicUsage
+    ) {
+        self.id = id
+        self.type = type
+        self.role = role
+        self.content = content
+        self.model = model
+        self.stopReason = stopReason
+        self.stopSequence = stopSequence
+        self.usage = usage
+    }
+}
+
+public struct AnthropicUsage: Codable, Sendable {
+    public let inputTokens: Int
+    public let outputTokens: Int
+    enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+    }
+    public init(inputTokens: Int, outputTokens: Int) {
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+    }
+}
+
+public struct AnthropicErrorResponse: Codable, Sendable {
+    public struct ErrorBody: Codable, Sendable {
+        public let type: String
+        public let message: String
+        public init(type: String, message: String) {
+            self.type = type
+            self.message = message
+        }
+    }
+    public let type: String = "error"
+    public let error: ErrorBody
+    public init(error: ErrorBody) { self.error = error }
+}
+
+/// Type-erased JSON value for fields we want to decode but don't care
+/// about the exact shape of (AnthropicTool.inputSchema, content blocks
+/// of unknown type).
+public enum AnyCodable: Codable, Sendable {
+    case null
+    case bool(Bool)
+    case int(Int)
+    case double(Double)
+    case string(String)
+    case array([AnyCodable])
+    case object([String: AnyCodable])
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null; return }
+        if let v = try? c.decode(Bool.self) { self = .bool(v); return }
+        if let v = try? c.decode(Int.self) { self = .int(v); return }
+        if let v = try? c.decode(Double.self) { self = .double(v); return }
+        if let v = try? c.decode(String.self) { self = .string(v); return }
+        if let v = try? c.decode([AnyCodable].self) { self = .array(v); return }
+        if let v = try? c.decode([String: AnyCodable].self) { self = .object(v); return }
+        throw DecodingError.dataCorruptedError(
+            in: c,
+            debugDescription: "AnyCodable: unsupported value"
+        )
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .bool(let v): try c.encode(v)
+        case .int(let v): try c.encode(v)
+        case .double(let v): try c.encode(v)
+        case .string(let v): try c.encode(v)
+        case .array(let v): try c.encode(v)
+        case .object(let v): try c.encode(v)
+        }
+    }
+}
+
+extension AnyCodable {
+    /// Convenience for places that know they're decoding a string.
+    public var stringValue: String? {
+        if case .string(let s) = self { return s }
+        return nil
+    }
+    /// Convenience for places that know they're decoding a dictionary.
+    public var objectValue: [String: AnyCodable]? {
+        if case .object(let o) = self { return o }
+        return nil
+    }
+}
+
+// MARK: - BinaryLocator
+//
+// Single source of truth for where to look for `mox` / `mox-server` on disk.
+// The candidate order matches DESIGN §1: Apple-Silicon Homebrew first
+// (`/opt/homebrew/bin`), Intel Homebrew + manual installs second
+// (`/usr/local/bin`), the system prefix third (`/usr/bin`), then the PATH
+// fallback. Returning the first executable file keeps `mox-server install`
+// honest about what it actually registered with launchd — the previous
+// `uname -m`-based guess returned paths that did not exist on the host.
+public enum BinaryLocator {
+    /// Conventional install locations in priority order. The first entry that
+    /// resolves to an existing executable wins.
+    public static let defaultCandidates: [String] = [
+        "/opt/homebrew/bin",          // Apple-Silicon Homebrew (default prefix)
+        "/usr/local/bin",             // Intel Homebrew + manual installs
+        "/usr/bin",                   // System-managed copies (rare)
+    ]
+
+    /// Resolves the absolute path to an executable named `name`, searching
+    /// `defaultCandidates` then `$PATH`. Returns `nil` when no executable
+    /// file is found — callers must surface that as an install error rather
+    /// than silently pick a non-existent path.
+    public static func locate(named name: String) -> String? {
+        let fm = FileManager.default
+        for dir in defaultCandidates {
+            let candidate = "\(dir)/\(name)"
+            if fm.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        // PATH fallback: explicit iteration avoids shell quoting surprises
+        // and login-shell PATH differences between GUI and CLI launches.
+        if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
+            for dir in pathEnv.split(separator: ":") {
+                let candidate = "\(dir)/\(name)"
+                if fm.isExecutableFile(atPath: candidate) {
+                    return candidate
+                }
+            }
+        }
+        return nil
+    }
 }

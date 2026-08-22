@@ -1,16 +1,25 @@
-import XCTest
+import Foundation
+import Testing
 @testable import MoxCore
 @testable import MoxShared
 
-final class MoxCoreTests: XCTestCase {
-    func testConfigManager() throws {
+/// Migrated from XCTestCase → @Test (Swift Testing) in v0.4 to remove the
+/// XCTest framework dependency. CommandLineTools SDK does not ship XCTest,
+/// and depending on the full Xcode toolchain just for unit tests is heavy.
+
+@Suite("MoxCore")
+struct MoxCoreTests {
+
+    @Test("AppConfig defaults match v0.3 baseline")
+    func configManager() {
         let config = AppConfig()
-        XCTAssertEqual(config.version, 1)
-        XCTAssertEqual(config.defaultSource, .huggingface)
-        XCTAssertEqual(config.server.port, 11555)
+        #expect(config.version == 1)
+        #expect(config.defaultSource == .huggingface)
+        #expect(config.server.port == 11555)
     }
-    
-    func testModelInfo() throws {
+
+    @Test("ModelInfo round-trips id and human-readable size")
+    func modelInfo() {
         let info = ModelInfo(
             id: "test-model",
             name: "Test Model",
@@ -19,45 +28,48 @@ final class MoxCoreTests: XCTestCase {
             size: 1024 * 1024 * 100,
             lastUsed: nil
         )
-        
-        XCTAssertEqual(info.id, "test-model")
+
+        #expect(info.id == "test-model")
         let s = info.sizeDescription
         // ByteCountFormatter may emit U+2006 SIX-PER-EM SPACE on newer macOS;
         // compare after normalising common Unicode whitespace to a single space.
         let normalized = s.unicodeScalars.map { scalar -> Character in
             CharacterSet.whitespaces.contains(scalar) ? " " : Character(scalar)
         }.reduce(into: "") { $0.append($1) }
-        XCTAssertEqual(normalized, "100 MB")
-    }
-    
-    func testMemoryGuard() throws {
-        let memoryGuard = MemoryGuard(reservePercent: 0.1)
-        let status = memoryGuard.getMemoryStatus()
-        
-        XCTAssertGreaterThan(status.totalGB, 0)
-        XCTAssertGreaterThanOrEqual(status.availableGB, 0)
+        #expect(normalized == "100 MB")
     }
 
-    func testRunnerCompilesAndTypes() async throws {
+    @Test("MemoryGuard reports positive totals and non-negative available")
+    func memoryGuard() {
+        let memoryGuard = MemoryGuard(reservePercent: 0.1)
+        let status = memoryGuard.getMemoryStatus()
+
+        #expect(status.totalGB > 0)
+        #expect(status.availableGB >= 0)
+    }
+
+    @Test("ModelRunner.shared lists nothing on a fresh process")
+    func runnerCompilesAndTypes() async {
         let config = AppConfig()
-        XCTAssertTrue(config.defaults.maxTokens > 0)
+        #expect(config.defaults.maxTokens > 0)
 
         let messages = [
             ChatMessage(role: "system", content: "You are mox."),
             ChatMessage(role: "user", content: "Hello!"),
         ]
-        XCTAssertEqual(messages.count, 2)
-        XCTAssertEqual(messages[0].role, "system")
+        #expect(messages.count == 2)
+        #expect(messages[0].role == "system")
 
         let ids = await ModelRunner.shared.listLoadedModels()
-        XCTAssertTrue(ids.isEmpty)
+        #expect(ids.isEmpty)
     }
 
     /// The CLI's `mox ask` (non-streaming) emits a single
     /// `ChatCompletionResponse` document. Lock the JSON shape so the daemon's
     /// `/v1/chat/completions` endpoint and the GUI's `HTTPAPIClient` agree
     /// on field names.
-    func testChatCompletionResponseShape() throws {
+    @Test("ChatCompletionResponse JSON shape matches OpenAI")
+    func chatCompletionResponseShape() throws {
         let response = ChatCompletionResponse(
             id: "chatcmpl-abc",
             created: 1_700_000_000,
@@ -77,20 +89,21 @@ final class MoxCoreTests: XCTestCase {
         )
         let data = try JSONEncoder().encode(response)
         let json = String(data: data, encoding: .utf8) ?? ""
-        XCTAssertTrue(json.contains("\"object\":\"chat.completion\""))
-        XCTAssertTrue(json.contains("\"model\":"))
-        XCTAssertTrue(json.contains("Qwen2.5-0.5B-Instruct"))
-        XCTAssertTrue(json.contains("\"finish_reason\":\"stop\""))
-        XCTAssertTrue(json.contains("\"prompt_tokens\":1"))
-        XCTAssertTrue(json.contains("\"completion_tokens\":1"))
-        XCTAssertTrue(json.contains("\"total_tokens\":2"))
-        XCTAssertTrue(json.contains("\"content\":\"hi\""))
+        #expect(json.contains("\"object\":\"chat.completion\""))
+        #expect(json.contains("\"model\":"))
+        #expect(json.contains("Qwen2.5-0.5B-Instruct"))
+        #expect(json.contains("\"finish_reason\":\"stop\""))
+        #expect(json.contains("\"prompt_tokens\":1"))
+        #expect(json.contains("\"completion_tokens\":1"))
+        #expect(json.contains("\"total_tokens\":2"))
+        #expect(json.contains("\"content\":\"hi\""))
     }
 
     /// The CLI's `mox ask --stream` emits one `ChatCompletionChunk` per line.
     /// Lock the shape so the GUI's `ProcessAPIClient` and the future daemon
     /// SSE endpoint decode it identically.
-    func testChatCompletionChunkShape() throws {
+    @Test("ChatCompletionChunk JSON shape matches OpenAI streaming")
+    func chatCompletionChunkShape() throws {
         let chunk = ChatCompletionChunk(
             id: "chatcmpl-xyz",
             object: "chat.completion.chunk",
@@ -106,13 +119,13 @@ final class MoxCoreTests: XCTestCase {
         )
         let data = try JSONEncoder().encode(chunk)
         let json = String(data: data, encoding: .utf8) ?? ""
-        XCTAssertTrue(json.contains("\"object\":\"chat.completion.chunk\""))
-        XCTAssertTrue(json.contains("\"role\":\"assistant\""))
-        XCTAssertTrue(json.contains("\"content\":\"hi\""))
+        #expect(json.contains("\"object\":\"chat.completion.chunk\""))
+        #expect(json.contains("\"role\":\"assistant\""))
+        #expect(json.contains("\"content\":\"hi\""))
         // Swift's default JSONEncoder omits nil Optionals — `finish_reason`
         // is dropped from the wire payload when null. The CLI's streaming
         // output therefore omits the key entirely for content chunks; the
         // terminal "stop" chunk emits it.
-        XCTAssertFalse(json.contains("finish_reason"))
+        #expect(!json.contains("finish_reason"))
     }
 }

@@ -371,13 +371,15 @@ final class AppState: ObservableObject {
     /// Spawns `mox-server start`. Failures (binary missing, launchctl
     /// refusing, etc.) bubble up so the caller can fall back to temporary
     /// mode with a clear error message.
+    /// `mox-server start` hands off to launchctl and returns quickly.
+    /// We await its termination on a background continuation so the
+    /// SwiftUI MainActor is never blocked by `proc.waitUntilExit()`.
     private func launchDaemon() async throws {
         let binary = Self.findMoxServerBinary()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binary)
         proc.arguments = ["start"]
-        // Drain stdout/stderr so the child doesn't block on a full pipe;
-        // we don't need its output here.
+        // Drain stdout/stderr so the child doesn't block on a full pipe.
         proc.standardOutput = Pipe()
         proc.standardError = Pipe()
         do {
@@ -385,16 +387,16 @@ final class AppState: ObservableObject {
         } catch {
             throw error
         }
-        // `mox-server start` returns immediately after handing off to
-        // launchctl. If launchctl never loaded the plist (e.g. it doesn't
-        // exist on this machine), the process exits quickly with a non-zero
-        // status; surface that as a startup error.
-        proc.waitUntilExit()
-        if proc.terminationStatus != 0 {
+        let status: Int32 = await withCheckedContinuation { continuation in
+            proc.terminationHandler = { p in
+                continuation.resume(returning: p.terminationStatus)
+            }
+        }
+        if status != 0 {
             throw NSError(
                 domain: "MoxGUI",
-                code: Int(proc.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: "mox-server start exited with status \(proc.terminationStatus). Is the launchd plist installed (mox-server install)?"]
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "mox-server start exited with status \(status). Is the launchd plist installed (mox-server install)?"]
             )
         }
     }
@@ -409,8 +411,11 @@ final class AppState: ObservableObject {
         proc.standardOutput = Pipe()
         proc.standardError = Pipe()
         try? proc.run()
-        proc.waitUntilExit()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            proc.terminationHandler = { _ in continuation.resume() }
+        }
     }
+
 
     // MARK: - Private: config I/O
 

@@ -1,7 +1,8 @@
 import Foundation
 import CryptoKit
 import MoxShared
-
+import MoxConvertCore
+import MoxShared
 /// Safely joins a single path component onto a parent URL. Rejects names that
 /// would escape the parent (empty, absolute, `..`, containing path separators,
 /// or anything that does not resolve to a direct child of the parent).
@@ -128,6 +129,16 @@ public actor ModelManager {
         return URL(fileURLWithPath: info.path)
     }
 
+    /// Read the on-disk manifest for a model directory. v0.8 callers use
+    /// this to surface compatibility without re-probing config.json.
+    public func readManifest(at directory: URL) throws -> ModelManifest? {
+        let manifestURL = directory.appendingPathComponent("mox.json")
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            return nil
+        }
+        let data = try Data(contentsOf: manifestURL)
+        return try JSONDecoder().decode(ModelManifest.self, from: data)
+    }
     public func deleteModel(id: String) async throws {
         let path = try await modelPath(for: id)
 
@@ -230,15 +241,28 @@ public actor ModelManager {
             }
 
             // Write sha256 manifest first so the file is always present even
-            // if the mox.json write below fails for any reason.
             try writeSha256Manifest(at: destinationDir, entries: shaEntries)
 
-            // Write mox.json so `listModels` and `modelInfo(for:)` can recover
-            // the source without reverse-engineering the directory name.
-            let manifest = ModelManifest(id: resolvedId, source: source, originalId: id)
+            // Smart routing: classify the pulled model so the caller (and
+            // `mox list --json`) can tell whether it's ready-to-use or needs
+            // conversion. v0.5 does NOT auto-convert (bf16→MLX requires a
+            // public MLX nn.Module→safetensors writer that mlx-swift does
+            // not yet expose). We record the probe in the manifest so a
+            // later release can pick up where we left off.
+            let probe = try MoxConverter().inspect(at: destinationDir)
+            let (sourceFormat, quantization) = deriveManifestFields(
+                probe: probe,
+                source: source
+            )
+            let manifest = ModelManifest(
+                id: resolvedId,
+                source: source,
+                originalId: id,
+                sourceFormat: sourceFormat,
+                quantization: quantization
+            )
             let manifestData = try JSONEncoder().encode(manifest)
-            try manifestData.write(to: destinationDir.appendingPathComponent("mox.json"))
-
+            try manifestData.write(to: destinationDir.appendingPathComponent("mox.json"), options: [.atomic])
             let size = try calculateDirectorySize(at: destinationDir)
             let modelInfo = ModelInfo(
                 id: resolvedId,
@@ -432,10 +456,35 @@ private func sha256Hex(of url: URL) throws -> String {
     let digest = hasher.finalize()
     return digest.map { String(format: "%02x", $0) }.joined()
 }
-
 private func writeSha256Manifest(at dir: URL, entries: [(String, String)]) throws {
     let body = entries.map { "\($0.1)  \($0.0)" }.joined(separator: "\n") + "\n"
     try Data(body.utf8).write(to: dir.appendingPathComponent("sha256.txt"))
+}
+
+/// Map a `MoxConverter` probe result into the manifest fields recorded in
+/// `mox.json`. Pure function — no I/O — so the routing tests can exercise
+/// it without standing up a real model directory.
+func deriveManifestFields(
+    probe: ModelProbe,
+    source: ModelSource
+) -> (sourceFormat: String, quantization: MoxQuantizationInfo?) {
+    let sourceFormat: String
+    let quantization: MoxQuantizationInfo?
+    switch probe {
+    case .mlxQuantized:
+        // Upstream already-quantized — record provenance only.
+        sourceFormat = "mlx-upstream-quantized"
+        quantization = nil
+    case .hfPrecision(let dtype):
+        // bf16 / fp16 / fp32 raw weights. v0.5 does not auto-convert; the
+        // manifest just records the fact so future tooling knows.
+        sourceFormat = "\(source.rawValue)-\(dtype)"
+        quantization = nil
+    case .unknown(let reason):
+        sourceFormat = "unknown(\(reason))"
+        quantization = nil
+    }
+    return (sourceFormat, quantization)
 }
 
 public enum ModelError: Error, LocalizedError {
@@ -444,6 +493,8 @@ public enum ModelError: Error, LocalizedError {
     case invalidPath(String)
     case invalidFileName(String)
     case invalidMirror(String)
+    case unsupportedArchitecture(String)
+    case compatibilityMismatch(persisted: String, fresh: String)
 
     public var errorDescription: String? {
         switch self {
@@ -457,6 +508,10 @@ public enum ModelError: Error, LocalizedError {
             return "Invalid file name rejected by path guard: '\(name)'"
         case .invalidMirror(let mirror):
             return "Mirror host not on allowlist: '\(mirror)'"
+        case .unsupportedArchitecture(let reason):
+            return "Unsupported architecture: \(reason)"
+        case .compatibilityMismatch(let p, let f):
+            return "Compatibility mismatch: persisted=\(p) fresh=\(f)"
         }
     }
 }

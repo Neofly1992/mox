@@ -20,6 +20,8 @@ struct MoxCLI {
             try await handlePull(args: Array(args[2...]))
         case "list":
             try await handleList(args: Array(args[2...]))
+        case "update":
+            try await handleUpdate(args: Array(args[2...]))
         case "run":
             try await handleRun(args: Array(args[2...]))
         case "delete":
@@ -137,22 +139,32 @@ struct MoxCLI {
 
     static func handleList(args: [String]) async throws {
         let modelManager = ModelManager.shared
-
+        var showCheck = false
+        for arg in args {
+            if arg == "--check" { showCheck = true }
+        }
         do {
             let models = try await modelManager.listModels()
-
             if models.isEmpty {
                 moxPrint("No models installed. Run 'mox pull <model>' to download a model.")
                 return
             }
-
             moxPrint("Installed models:")
             moxPrint(String(format: "%-50s %-15s %-10s", "NAME", "SOURCE", "SIZE"))
             moxPrint(String(repeating: "-", count: 75))
-
             for model in models {
                 let name = model.name.count > 48 ? String(model.name.prefix(45)) + "..." : model.name
                 moxPrint(String(format: "%-50s %-15s %-10s", name, model.source.rawValue, model.sizeDescription))
+            }
+            if showCheck {
+                moxPrint("")
+                moxPrint("Update check (size-only, v0.8 — remote fetch in v0.9):")
+                for model in models {
+                    let dir = URL(fileURLWithPath: model.path)
+                    let local = (try? LocalInventoryBuilder.walk(directory: dir)) ?? [:]
+                    let cached = local.count
+                    moxPrint("  \(model.name): \(cached) local files, \(local.values.reduce(Int64(0)) { $0 + $1.sizeBytes }) bytes on disk")
+                }
             }
         } catch {
             moxStderr("Error listing models: \(error.localizedDescription)")
@@ -166,6 +178,8 @@ struct MoxCLI {
         var host: String = config.server.host
         var hostOverridden = false
         var portOverridden = false
+        var skipWarmup = false
+        var warmupTokens = 16
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -181,6 +195,13 @@ struct MoxCLI {
                     host = args[i]
                     hostOverridden = true
                 }
+            case "--no-warmup":
+                skipWarmup = true
+            case "--warmup-tokens":
+                i += 1
+                if i < args.count, let n = Int(args[i]), n > 0 {
+                    warmupTokens = n
+                }
             default:
                 if modelId == nil {
                     modelId = args[i]
@@ -188,12 +209,10 @@ struct MoxCLI {
             }
             i += 1
         }
-        // CLI override flags are tracked so future revisions can warn when
-        // they diverge from values persisted in `~/.mox/config.json`.
         _ = (hostOverridden, portOverridden)
         guard let id = modelId else {
             moxPrint("Error: Model ID required")
-            moxStderr("Usage: mox run <model-id> [--port 8080]")
+            moxStderr("Usage: mox run <model-id> [--port 8080] [--no-warmup] [--warmup-tokens N]")
             return
         }
 
@@ -215,6 +234,21 @@ struct MoxCLI {
 
         moxPrint("Starting server for model: \(modelInfo.name)")
         moxPrint("API available at: http://\(host):\(port)")
+
+        // Eager load + warmup so the first client request doesn't pay the
+        // cold-start tax. Fail fast with a structured exit code if the model
+        // is broken instead of letting the daemon come up unhealthy.
+        if !skipWarmup {
+            moxPrint("Loading + warmup \(warmupTokens) tokens...")
+            do {
+                _ = try await ModelRunner.shared.loadModel(id: id, config: config)
+                _ = try await ModelRunner.shared.warmup(id: id, tokens: warmupTokens)
+                moxPrint("Warmup OK")
+            } catch {
+                moxStderr("warmup failed for \(id): \(error.localizedDescription)")
+                exit(5)
+            }
+        }
 
         let server = MoxServer(host: host, port: port)
         try server.start()
@@ -420,29 +454,34 @@ struct MoxCLI {
                 moxPrint(line)
             }
 
-            for await piece in await runner.chatStream(
-                modelId: id,
-                messages: messages,
-                maxTokens: maxTokens,
-                temperature: temperature,
-                topP: topP
-            ) {
-                let payload = ChatCompletionChunk(
-                    id: "chatcmpl-\(UUID().uuidString.prefix(8))",
-                    object: "chat.completion.chunk",
-                    created: Int64(Date().timeIntervalSince1970),
-                    model: id,
-                    choices: [
-                        ChatCompletionChunk.Choice(
-                            index: 0,
-                            delta: ChatCompletionChunk.Delta(role: nil, content: piece),
-                            finishReason: nil
-                        )
-                    ]
-                )
-                if let data = try? encoder.encode(payload), let line = String(data: data, encoding: .utf8) {
-                    moxPrint(line)
+            do {
+                for try await piece in await runner.chatStream(
+                    modelId: id,
+                    messages: messages,
+                    maxTokens: maxTokens,
+                    temperature: temperature,
+                    topP: topP
+                ) {
+                    let payload = ChatCompletionChunk(
+                        id: "chatcmpl-\(UUID().uuidString.prefix(8))",
+                        object: "chat.completion.chunk",
+                        created: Int64(Date().timeIntervalSince1970),
+                        model: id,
+                        choices: [
+                            ChatCompletionChunk.Choice(
+                                index: 0,
+                                delta: ChatCompletionChunk.Delta(role: nil, content: piece),
+                                finishReason: nil
+                            )
+                        ]
+                    )
+                    if let data = try? encoder.encode(payload), let line = String(data: data, encoding: .utf8) {
+                        moxPrint(line)
+                    }
                 }
+            } catch {
+                moxStderr("mox ask stream failed: \(error)")
+                exit(1)
             }
 
             // Terminator chunk — finishReason "stop" with empty delta. Mirrors
@@ -508,6 +547,53 @@ struct MoxCLI {
         }
     }
 
+    static func handleUpdate(args: [String]) async throws {
+        guard let modelId = args.first else {
+             moxPrint("Error: Model ID required")
+            moxStderr("Usage: mox update <model-id> [--revision <rev>]")
+            return
+        }
+        var revision: String? = nil
+        var i = 1
+        while i < args.count {
+            switch args[i] {
+            case "--revision":
+                i += 1
+                if i < args.count { revision = args[i] }
+            default:
+                break
+            }
+            i += 1
+        }
+        let modelManager = ModelManager.shared
+        guard let info = try? await modelManager.modelInfo(for: modelId) else {
+            moxPrint("Model '\(modelId)' not found.")
+            return
+        }
+        let localDir = URL(fileURLWithPath: info.path)
+        let fetcher = HuggingFaceInventoryFetcher()
+        let downloader = ResumableDownloader()
+        let updater = ModelUpdater(fetcher: fetcher, downloader: downloader)
+        moxPrint("Checking for updates to \(modelId)…")
+        do {
+            let plan = try await updater.update(
+                modelId: modelId,
+                localDirectory: localDir,
+                revision: revision,
+                progressHandler: { progress in
+                    let pct = progress.totalBytes > 0
+                        ? Double(progress.bytesDownloaded) / Double(progress.totalBytes)
+                        : 0
+                    moxPrint(String(format: "\rDownloading… %.1f%%", pct * 100))
+                }
+            )
+            moxPrint("")
+            moxPrint("Plan summary: \(plan.files.count) files, \(plan.totalBytesToFetch) bytes to fetch, revision=\(plan.sourceRevision ?? "(unchanged)")")
+            moxPrint("Done.")
+        } catch {
+            moxStderr("Update failed: \(error.localizedDescription)")
+        }
+    }
     // MARK: - debug (developer utilities)
 
     static func handleDebug(args: [String]) async {

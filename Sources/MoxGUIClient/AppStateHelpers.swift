@@ -78,20 +78,14 @@ public enum MoxGUIConfig {
     /// Homebrew under `/opt/homebrew`, Intel under `/usr/local`; both are
     /// tried, with `mox` (without `-server`) as a less-recommended fallback
     /// for systems that bundle the two binaries into one executable.
-    public static let defaultBinaryCandidates: [String] = [
-        "/usr/local/bin/mox-server",
-        "/opt/homebrew/bin/mox-server",
-        "/usr/local/bin/mox",
-        "/opt/homebrew/bin/mox",
-    ]
-
     public static func findMoxServerBinary() -> String {
-        let fm = FileManager.default
-        for path in defaultBinaryCandidates where fm.isExecutableFile(atPath: path) {
-            return path
+        // Delegates to `MoxShared.BinaryLocator` so the GUI, the launchd
+        // installer, and the process client all share one source of truth
+        // for the binary search order.
+        if let resolved = BinaryLocator.locate(named: "mox-server") {
+            return resolved
         }
-        // Fall back to the conventional first candidate. Spawn will surface
-        // a meaningful error if it doesn't actually exist on disk.
-        return defaultBinaryCandidates[0]
+        // Last-resort fallback: Process.run() surfaces a clean error.
+        return "/opt/homebrew/bin/mox-server"
     }
 }

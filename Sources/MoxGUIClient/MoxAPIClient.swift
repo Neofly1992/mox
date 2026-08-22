@@ -365,16 +365,10 @@ public enum MoxAPIClientFactory {
     /// Constructs a process-backed client using the conventional binary
     /// locations. The GUI uses this when no daemon is reachable.
     public static func defaultProcessClient() -> ProcessAPIClient {
-        let candidates = [
-            "/usr/local/bin/mox",
-            "/opt/homebrew/bin/mox"
-        ]
-        let fm = FileManager.default
-        for path in candidates where fm.isExecutableFile(atPath: path) {
-            return ProcessAPIClient(binaryPath: path)
+        if let resolved = BinaryLocator.locate(named: "mox") {
+            return ProcessAPIClient(binaryPath: resolved)
         }
-        // Fall back to the first candidate even if it doesn't exist —
-        // ProcessAPIClient will surface a clean error at first use.
-        return ProcessAPIClient(binaryPath: candidates[0])
+        // Last-resort fallback: Process.run() surfaces a clean error.
+        return ProcessAPIClient(binaryPath: "/opt/homebrew/bin/mox")
     }
 }

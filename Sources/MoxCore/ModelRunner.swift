@@ -1,9 +1,10 @@
 import Foundation
-import Hub
 import MLX
+import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
 import MoxShared
+import MoxConvertCore
 import Tokenizers
 
 /// Drives an MLX LLM end-to-end: loads weights from a local model directory,
@@ -15,6 +16,12 @@ public actor ModelRunner {
     private let memoryGuard = MemoryGuard.shared
 
     public init() {}
+
+    deinit {
+        // Best-effort cleanup. ModelContainer has no explicit destructor;
+        // clearing the map lets ARC reclaim the heavy model + cache.
+        loadedModels.removeAll()
+    }
 
     // MARK: - Public API
 
@@ -38,15 +45,50 @@ public actor ModelRunner {
         let modelPath = URL(fileURLWithPath: modelInfo.path)
         try Self.requireModelDirectory(at: modelPath)
 
-        let container = try await loadModelContainer(directory: modelPath)
-        let record = LoadedModel(id: id, modelPath: modelPath, loadedAt: Date())
+        let container = try await loadModelContainer(from: modelPath, using: #huggingFaceTokenizerLoader())
+        let manifest = (try? await ModelManager.shared.readManifest(at: modelPath))
+        let persistedTier = manifest?.compatibility?.tier
+        let persistedReason = manifest?.compatibility?.reason
+
+        // v0.8 — fresh probe at load time. Refuse to bring the model
+        // up if the on-disk config no longer matches the persisted
+        // tier AND the fresh tier is `.incompatible`. Otherwise log
+        // the verdict so the operator can see it via `/health`.
+        let freshCompatibility = try? CompatibilityProbe.probe(at: modelPath)
+        let freshTier = freshCompatibility?.tier
+        let verdict: CompatibilityVerdict = Self.compatibilityVerdict(
+            persisted: persistedTier,
+            fresh: freshTier
+        )
+        if verdict == .incompatible {
+            moxLog.error("model \(id, privacy: .public) load rejected: fresh probe incompatible")
+            throw ModelError.unsupportedArchitecture(
+                freshCompatibility?.reason ?? "compatibility probe rejected"
+            )
+        }
+        if verdict == .mismatchDowngraded {
+            moxLog.warning(
+                "model \(id, privacy: .public) compatibility downgraded: persisted=\(persistedTier?.rawValue ?? "nil", privacy: .public) fresh=\(freshTier?.rawValue ?? "nil", privacy: .public)"
+            )
+        }
+
+        let record = LoadedModel(
+            id: id,
+            modelPath: modelPath,
+            loadedAt: Date(),
+            compatibility: persistedTier,
+            compatibilityReason: persistedReason,
+            compatibilityFresh: freshTier,
+            compatibilityVerdict: verdict
+        )
+        moxLog.info("model loaded: \(id, privacy: .public) path=\(modelPath.path, privacy: .public)")
         loadedModels[id] = Entry(container: container, record: record)
         return record
     }
-
     public func unloadModel(id: String) {
         loadedModels.removeValue(forKey: id)
     }
+
 
     public func unloadAll() {
         loadedModels.removeAll()
@@ -60,6 +102,43 @@ public actor ModelRunner {
         Array(loadedModels.keys)
     }
 
+    /// Returns the model-family hint for a previously loaded model.
+    /// Returns nil for models that aren't loaded yet (cold path).
+    /// Callers should warm the model first via `loadModel` or
+    /// `container(for:)` if they need the family hint.
+    public func modelFamilyHint(for modelId: String) -> String? {
+        loadedModels[modelId]?.record.modelFamily
+    }
+
+    /// Returns the full `LoadedModel` records currently in memory. Used by
+    /// `/health` to surface capability fields without re-loading weights.
+    public func snapshotLoaded() -> [LoadedModel] {
+        loadedModels.values.map(\.record)
+    }
+
+    /// End-to-end smoke check after `loadModel`. Runs a tiny generation so
+    /// the launchd-managed daemon refuses to come up on a broken install
+    /// (corrupt weights, missing chat template, MLX kernel miss). Returns the
+    /// generated text so callers can log it; throws on any failure.
+    public func warmup(id: String, tokens: Int = 16) async throws -> String {
+        let entries = [SendableChatEntry(role: "user", content: "hi")]
+        let params = GenerateParameters(
+            maxTokens: tokens,
+            temperature: 0,
+            topP: 1.0
+        )
+        do {
+            return try await runGeneration(
+                modelId: id, entries: entries, parameters: params
+            )
+        } catch {
+            moxLog.error("warmup failed for \(id, privacy: .public): \(String(describing: error), privacy: .public)")
+            throw error
+        }
+    }
+
+    /// Single-token completion. Use for tool / agent flows; for chat prefer
+    /// `chat` or `chatStream`.
     public func generate(
         modelId: String,
         prompt: String,
@@ -67,16 +146,16 @@ public actor ModelRunner {
         temperature: Double? = nil,
         topP: Double? = nil
     ) async throws -> String {
-        let defaults = await Self.resolvedDefaults()
-        let params = Self.makeParameters(
-            maxTokens: maxTokens ?? defaults.maxTokens,
-            temperature: temperature ?? defaults.temperature,
-            topP: topP ?? defaults.topP
+        let params = await Self.resolvedParameters(
+            maxTokens: maxTokens,
+            temperature: temperature,
+            topP: topP
         )
-        let input = UserInput(prompt: prompt)
-        return try await runGeneration(modelId: modelId, input: input, parameters: params)
+        let entries = [SendableChatEntry(role: "user", content: prompt)]
+        return try await runGeneration(modelId: modelId, entries: entries, parameters: params)
     }
 
+    /// Non-streaming chat completion; returns the assembled `ChatCompletionResponse`.
     public func chat(
         modelId: String,
         messages: [ChatMessage],
@@ -84,27 +163,15 @@ public actor ModelRunner {
         temperature: Double? = nil,
         topP: Double? = nil
     ) async throws -> ChatCompletionResponse {
-        let defaults = await Self.resolvedDefaults()
-        let tokens = maxTokens ?? defaults.maxTokens
-        let temp = temperature ?? defaults.temperature
-        let p = topP ?? defaults.topP
-        let params = Self.makeParameters(maxTokens: tokens, temperature: temp, topP: p)
-
-        let chat = Self.toChatMessages(messages)
-        let input = UserInput(chat: chat)
-
-        let container = try await container(for: modelId)
-        let stream = try await container.perform { context -> AsyncStream<Generation> in
-            let lmInput = try await context.processor.prepare(input: input)
-            return try MLXLMCommon.generate(
-                input: lmInput, parameters: params, context: context)
-        }
-        var assembled = ""
-        for await event in stream {
-            if case .chunk(let text) = event {
-                assembled += text
-            }
-        }
+        let params = await Self.resolvedParameters(
+            maxTokens: maxTokens,
+            temperature: temperature,
+            topP: topP
+        )
+        let entries = Self.toSendableEntries(messages)
+        let assembled = try await runGeneration(
+            modelId: modelId, entries: entries, parameters: params
+        )
 
         let promptTokens = Self.estimatePromptTokens(messages)
         let completionTokens = max(1, assembled.count / 4)
@@ -127,51 +194,37 @@ public actor ModelRunner {
         )
     }
 
-    /// Streams the assistant response chunk-by-chunk as it is generated.
-    /// - Returns: an `AsyncStream` of decoded text chunks.
+    /// Streaming chat completion. The `AsyncThrowingStream` propagates MLX
+    /// generation errors to the caller so SSE / stdout consumers can surface
+    /// a real `event: error` chunk instead of a silent close (see
+    /// `MoxServer.handleAnthropicStream`).
     public func chatStream(
         modelId: String,
         messages: [ChatMessage],
         maxTokens: Int? = nil,
         temperature: Double? = nil,
         topP: Double? = nil
-    ) -> AsyncStream<String> {
-        let chat = Self.toChatMessages(messages)
-        let input = UserInput(chat: chat)
-        return AsyncStream { continuation in
-            let task = Task {
+    ) -> AsyncThrowingStream<String, Error> {
+        let entries = Self.toSendableEntries(messages)
+        return AsyncThrowingStream { continuation in
+            let task = Task { [self] in
                 do {
-                    // Config + parameter resolution happens inside the Task so
-                    // the public method can keep its synchronous signature
-                    // even though `resolvedDefaults()` is now async (it
-                    // touches the actor-isolated `ConfigManager`).
-                    let defaults = await Self.resolvedDefaults()
-                    let tokens = maxTokens ?? defaults.maxTokens
-                    let temp = temperature ?? defaults.temperature
-                    let p = topP ?? defaults.topP
-                    let params = Self.makeParameters(maxTokens: tokens, temperature: temp, topP: p)
-
-                    let container = try await self.container(for: modelId)
-                    let stream = try await container.perform { context -> AsyncStream<Generation> in
-                        let lmInput = try await context.processor.prepare(input: input)
-                        return try MLXLMCommon.generate(
-                            input: lmInput, parameters: params, context: context)
-                    }
-                    for await event in stream {
-                        switch event {
-                        case .chunk(let text):
-                            if !text.isEmpty {
-                                continuation.yield(text)
-                            }
-                        case .info:
-                            break
-                        case .toolCall:
-                            break
+                    let params = await Self.resolvedParameters(
+                        maxTokens: maxTokens,
+                        temperature: temperature,
+                        topP: topP
+                    )
+                    let stream = try await self._generateStream(
+                        modelId: modelId, entries: entries, parameters: params
+                    )
+                    for try await event in stream {
+                        if case .chunk(let text) = event, !text.isEmpty {
+                            continuation.yield(text)
                         }
                     }
                     continuation.finish()
                 } catch {
-                    continuation.finish()
+                    continuation.finish(throwing: error)
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -185,24 +238,41 @@ public actor ModelRunner {
         let record: LoadedModel
     }
 
+    /// Single non-streaming generation core, used by `generate` and `chat`.
     private func runGeneration(
         modelId: String,
-        input: UserInput,
+        entries: [SendableChatEntry],
         parameters: GenerateParameters
     ) async throws -> String {
-        let container = try await container(for: modelId)
-        let stream = try await container.perform { context -> AsyncStream<Generation> in
-            let lmInput = try await context.processor.prepare(input: input)
-            return try MLXLMCommon.generate(
-                input: lmInput, parameters: parameters, context: context)
-        }
+        let stream = try await _generateStream(
+            modelId: modelId, entries: entries, parameters: parameters
+        )
         var assembled = ""
-        for await event in stream {
+        for try await event in stream {
             if case .chunk(let text) = event {
                 assembled += text
             }
         }
         return assembled
+    }
+
+    /// Streaming core. Crosses the actor boundary into `container.perform { … }`
+    /// to drive MLX generation, then returns an `AsyncStream<Generation>` that
+    /// the caller drains. Errors are propagated to the caller's
+    /// `AsyncThrowingStream` via the wrapping `chatStream`.
+    private func _generateStream(
+        modelId: String,
+        entries: [SendableChatEntry],
+        parameters: GenerateParameters
+    ) async throws -> AsyncStream<Generation> {
+        let container = try await container(for: modelId)
+        return try await container.perform { context -> AsyncStream<Generation> in
+            let chat = Self.sendableToChatMessages(entries)
+            let lmInput = try await context.processor.prepare(input: UserInput(chat: chat))
+            return try MLXLMCommon.generate(
+                input: lmInput, parameters: parameters, context: context
+            )
+        }
     }
 
     private func container(for modelId: String) async throws -> ModelContainer {
@@ -230,8 +300,40 @@ public actor ModelRunner {
         )
     }
 
-    private static func resolvedDefaults() async -> AppConfig.ModelDefaults {
-        (try? await ConfigManager.shared.load())?.defaults ?? AppConfig.ModelDefaults()
+    /// Resolves the verdict from comparing persisted vs fresh tiers.
+    /// Used by `loadModel` to decide whether to refuse the model.
+    /// - `.match` if both are nil or both agree.
+    /// - `.incompatible` if fresh is `.incompatible` OR the persisted
+    ///   label says it's safe and the fresh probe says it's not.
+    static func compatibilityVerdict(
+        persisted: CompatibilityTier?,
+        fresh: CompatibilityTier?
+    ) -> CompatibilityVerdict {
+        // Fresh `.incompatible` is the only verdict that triggers a
+        // refusal — the persisted label is treated as advisory once
+        // a fresh probe disagrees.
+        if let fresh, fresh == .incompatible { return .incompatible }
+        // Both nil = nothing to compare; treat as match so the cold
+        // path doesn't false-positive.
+        if persisted == nil && fresh == nil { return .match }
+        // Any other mismatch (incl. persisted-only / fresh-only /
+        // both-sides-agree-on-different-tier) is a downgrade — the
+        // operator gets the verdict via `/health`.
+        if persisted != fresh { return .mismatchDowngraded }
+        return .match
+    }
+
+    private static func resolvedParameters(
+        maxTokens: Int?,
+        temperature: Double?,
+        topP: Double?
+    ) async -> GenerateParameters {
+        let defaults = (try? await ConfigManager.shared.load())?.defaults ?? AppConfig.ModelDefaults()
+        return makeParameters(
+            maxTokens: maxTokens ?? defaults.maxTokens,
+            temperature: temperature ?? defaults.temperature,
+            topP: topP ?? defaults.topP
+        )
     }
 
     private static func toChatMessages(_ messages: [ChatMessage]) -> [Chat.Message] {
@@ -243,6 +345,29 @@ public actor ModelRunner {
                 return .assistant(msg.content)
             default:
                 return .user(msg.content)
+            }
+        }
+    }
+
+    /// Sendable mirror of `[Chat.Message]` for crossing `@Sendable` closures
+    /// (e.g. `container.perform { ... }` callbacks). The closure reconstructs
+    /// the full `UserInput` after the actor hop so the captured value is just
+    /// plain strings — no `Chat.Message` ever escapes an actor boundary.
+    private struct SendableChatEntry: Sendable {
+        let role: String
+        let content: String
+    }
+
+    private static func toSendableEntries(_ messages: [ChatMessage]) -> [SendableChatEntry] {
+        messages.map { SendableChatEntry(role: $0.role.lowercased(), content: $0.content) }
+    }
+
+    private static func sendableToChatMessages(_ entries: [SendableChatEntry]) -> [Chat.Message] {
+        entries.map { entry in
+            switch entry.role {
+            case "system": return .system(entry.content)
+            case "assistant": return .assistant(entry.content)
+            default: return .user(entry.content)
             }
         }
     }
@@ -269,4 +394,59 @@ public struct LoadedModel: Sendable {
     public let id: String
     public let modelPath: URL
     public let loadedAt: Date
+    /// Capability surface reported via `/health`. Populated by `loadModel`
+    /// from the loaded tokenizer + chat template; absent on the cold path.
+    public let modelFamily: String?
+    public let supportsToolCalls: Bool
+    public let contextWindow: Int?
+    public let samplerDefaults: SamplerDefaults
+    public let warmupTokens: Int?
+    /// v0.8+ — compatibility tier from the manifest, surfaced via /health.
+    public let compatibility: CompatibilityTier?
+    public let compatibilityReason: String?
+    /// v0.8+ — fresh probe at load time. If this disagrees with the
+    /// persisted `compatibility` the loader logs a warning and rejects
+    /// if the fresh probe is `.incompatible`.
+    public let compatibilityFresh: CompatibilityTier?
+    public let compatibilityVerdict: CompatibilityVerdict?
+    public init(
+        id: String,
+        modelPath: URL,
+        loadedAt: Date,
+        modelFamily: String? = nil,
+        supportsToolCalls: Bool = false,
+        contextWindow: Int? = nil,
+        samplerDefaults: SamplerDefaults = SamplerDefaults(),
+        warmupTokens: Int? = nil,
+        compatibility: CompatibilityTier? = nil,
+        compatibilityReason: String? = nil,
+        compatibilityFresh: CompatibilityTier? = nil,
+        compatibilityVerdict: CompatibilityVerdict? = nil
+    ) {
+        self.id = id
+        self.modelPath = modelPath
+        self.loadedAt = loadedAt
+        self.modelFamily = modelFamily
+        self.supportsToolCalls = supportsToolCalls
+        self.contextWindow = contextWindow
+        self.samplerDefaults = samplerDefaults
+        self.warmupTokens = warmupTokens
+        self.compatibility = compatibility
+        self.compatibilityReason = compatibilityReason
+        self.compatibilityFresh = compatibilityFresh
+        self.compatibilityVerdict = compatibilityVerdict
+    }
+}
+
+/// Outcome of comparing persisted manifest tier against a fresh
+/// `CompatibilityProbe`. Surfaced via `/health` so an operator can see
+/// when a model on disk no longer matches its manifest label.
+public enum CompatibilityVerdict: String, Codable, Sendable, Equatable {
+    /// Fresh probe agrees with the persisted tier.
+    case match
+    /// Fresh probe disagrees but the new tier is still usable.
+    case mismatchDowngraded
+    /// Fresh probe disagrees and the new tier is `.incompatible`; the
+    /// loader refused to bring the model up.
+    case incompatible
 }

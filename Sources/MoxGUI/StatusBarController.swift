@@ -1,19 +1,25 @@
 import AppKit
 import SwiftUI
 
-/// Menu-bar status item, registered only when the GUI launches in daemon mode.
-/// v0.3 ships a stub: a button labelled "Mox" that opens a small popover with
-/// the current model name and an "Open Mox" affordance. Quick-prompt input
-/// (the killer feature for a status-bar utility) lands alongside the
-/// conversation UI in the next milestone.
+/// Menu-bar status item, registered only when the GUI launches in daemon
+/// mode. The popover shows a model label and an "Open Mox" affordance.
+/// Quick-prompt input lands alongside the conversation UI in a later
+/// milestone.
 @MainActor
 final class StatusBarController {
-    private let statusItem: NSStatusItem
+    private nonisolated(unsafe) let statusItem: NSStatusItem
     private var popover: NSPopover?
-
     init() {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         configureButton()
+    }
+
+    /// Remove the status item from the system bar. Without this the menu-bar
+    /// icon stays orphaned when the controller is dropped on mode toggle,
+    /// so a daemon→temporary→daemon round trip leaves two ghost "Mox"
+    /// items.
+    deinit {
+        NSStatusBar.system.removeStatusItem(statusItem)
     }
 
     /// Make the status item visible. Idempotent — calling twice is harmless.
@@ -25,7 +31,7 @@ final class StatusBarController {
         if popover == nil {
             let popover = NSPopover()
             popover.behavior = .transient
-            popover.contentSize = NSSize(width: 220, height: 80)
+            popover.contentSize = NSSize(width: 240, height: 120)
             popover.contentViewController = NSHostingController(
                 rootView: StatusBarPopover()
             )
@@ -50,8 +56,6 @@ final class StatusBarController {
     }
 }
 
-/// Minimal popover content. The real implementation grows alongside the
-/// conversation UI.
 private struct StatusBarPopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -61,10 +65,15 @@ private struct StatusBarPopover: View {
                 .foregroundStyle(.secondary)
             Divider()
             Button("Open Mox") {
-                NSApp.activate(ignoringOtherApps: true)
+                NSApp.activate()
+                // Reveal the main window if the user closed it; `WindowGroup`
+                // does not auto-restore on macOS 14+.
+                if let window = NSApp.windows.first(where: { $0.canBecomeMain }) {
+                    window.makeKeyAndOrderFront(nil)
+                }
             }
         }
         .padding(12)
-        .frame(width: 220)
+        .frame(width: 240)
     }
 }

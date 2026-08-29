@@ -189,7 +189,7 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
                 respond(
                     on: context.channel,
                     status: .payloadTooLarge,
-                    payload: ErrorPayload(error: ErrorBody(
+                    payload: OpenAIErrorPayload(error: OpenAIErrorBody(
                         message: "Request body exceeds 16 MiB limit",
                         type: "invalid_request_error",
                         code: "request_too_large"
@@ -205,7 +205,7 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
                 respond(
                     on: context.channel,
                     status: .badRequest,
-                    payload: ErrorPayload(error: ErrorBody(
+                    payload: OpenAIErrorPayload(error: OpenAIErrorBody(
                         message: "Malformed request: missing .head before .end",
                         type: "invalid_request_error",
                         code: "malformed_request"
@@ -238,7 +238,7 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
             handleAnthropicMessages(channel: channel, body: body)
         case .notFound:
             JSONResponse.write(
-                ErrorPayload(error: ErrorBody(
+                OpenAIErrorPayload(error: OpenAIErrorBody(
                     message: "Not found",
                     type: "invalid_request_error",
                     code: "not_found"
@@ -247,6 +247,7 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
                 on: channel
             )
         }
+    }
 
     private func handleListModels(channel: Channel) {
         // listModels is now async because ModelManager is an actor. Dispatch
@@ -986,62 +987,70 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
         var buf = channel.allocator.buffer(capacity: bytes.utf8.count)
         buf.writeString(bytes)
         channel.write(HTTPServerResponsePart.body(.byteBuffer(buf))).whenComplete { _ in }
-        channel.writeAndFlush(HTTPServerResponsePart.end(nil)).whenComplete { _ in }
-        finishPending()
     }
+
+    private func finishPending() {
+        if let promise = pendingResponse {
+            promise.succeed(())
+            pendingResponse = nil
+        }
+    }
+
 
     private func endAnthropicSSE(channel: Channel) {
         channel.writeAndFlush(HTTPServerResponsePart.end(nil)).whenComplete { _ in }
         finishPending()
     }
 
+    /// Thin shim around `JSONResponse.write` for the Anthropic JSON
+    /// envelope. v0.8 — pre-aggregates the `anthropic-version` header.
     private func respondAnthropicJSON<Payload: Encodable>(
         on channel: Channel,
         status: HTTPResponseStatus,
         payload: Payload
     ) {
-        let body: ByteBuffer
-        do {
-            let data = try JSONEncoder().encode(payload)
-            body = channel.allocator.buffer(bytes: data)
-        } catch {
-            respondAnthropicError(on: channel,
-                status: .internalServerError,
-                type: "api_error",
-                message: error.localizedDescription)
-            return
-        }
-        var headers = HTTPHeaders()
-        headers.add(name: "Content-Type", value: "application/json")
-        headers.add(name: "Content-Length", value: String(body.readableBytes))
-        headers.add(name: "anthropic-version", value: "2023-06-01")
-        let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
-        channel.write(HTTPServerResponsePart.head(head)).whenComplete { _ in }
-        channel.write(HTTPServerResponsePart.body(.byteBuffer(body))).whenComplete { _ in }
-        channel.writeAndFlush(HTTPServerResponsePart.end(nil)).whenComplete { _ in }
-        finishPending()
-    private func respondAnthropicError(
+        JSONResponse.write(
+            payload,
+            status: status,
+            extraHeaders: ["anthropic-version": "2023-06-01"],
+            on: channel
+        )
     }
 
+    /// Build an Anthropic-shaped error envelope and write it.
     private func respondAnthropicError(
         on channel: Channel,
         status: HTTPResponseStatus,
         type: String,
         message: String
     ) {
-        let body = AnthropicErrorResponse(error: .init(type: type, message: message))
-        respondAnthropicJSON(on: channel, status: status, payload: body)
+        let envelope = AnthropicErrorResponse(error: .init(type: type, message: message))
+        JSONResponse.write(
+            envelope,
+            status: status,
+            extraHeaders: ["anthropic-version": "2023-06-01"],
+            on: channel
+        )
     }
 
     private func respondError(on channel: Channel, error: Error) {
         JSONResponse.writeError(error, kind: .openAI, on: channel)
     }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        if let promise = pendingResponse {
+            promise.fail(ChannelError.ioOnClosedChannel)
+            pendingResponse = nil
+        }
+        if let task = pendingTask {
             task.cancel()
             pendingTask = nil
         }
         context.fireChannelInactive()
     }
+
 }
+
 
 
 private struct ModelItem: Encodable {
@@ -1069,3 +1078,10 @@ public enum HTTPError: Error, LocalizedError {
         }
     }
 }
+
+/// Wire shapes for the two error envelopes emitted by the
+/// early-exit paths in `channelRead`. The main endpoints route
+/// through `JSONResponse` for the happy path; these types exist
+/// solely so the `payloadTooLarge` / `malformedRequest` branches
+/// can hand a value to the `respond` shim.
+

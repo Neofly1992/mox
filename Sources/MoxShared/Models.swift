@@ -994,6 +994,29 @@ public struct AnthropicErrorResponse: Codable, Sendable {
     public init(error: ErrorBody) { self.error = error }
 }
 
+/// OpenAI-style error envelope: `{"error":{"message","type","code"}}`.
+/// v0.8 — single envelope for the OpenAI endpoint family. Anthropic
+/// uses `AnthropicErrorResponse` instead. Both share the same `type`
+/// and `message` field names but the outer wrapping differs.
+public struct OpenAIErrorBody: Codable, Sendable, Equatable {
+    public let message: String
+    public let type: String
+    public let code: String?
+
+    public init(message: String, type: String, code: String? = nil) {
+        self.message = message
+        self.type = type
+        self.code = code
+    }
+}
+
+public struct OpenAIErrorPayload: Codable, Sendable, Equatable {
+    public let error: OpenAIErrorBody
+
+    public init(error: OpenAIErrorBody) { self.error = error }
+}
+
+
 /// Type-erased JSON value for fields we want to decode but don't care
 /// about the exact shape of (AnthropicTool.inputSchema, content blocks
 /// of unknown type).

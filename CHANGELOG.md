@@ -3,6 +3,31 @@
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
 
+## v0.8.1 — Code-quality audit fixes
+
+### Changed
+
+- **Server.swift dispatch is now table-driven** (`HTTPRouter.routes`):
+  new endpoints add one line, no edits to the dispatcher.
+- **Single JSON response writer** (`JSONResponse.write` /
+  `JSONResponse.writeError`): replaces the previous 90%-duplicated
+  `respond` + `respondAnthropicJSON` + `respondError` +
+  `respondAnthropicError` quartet. OpenAI / Anthropic envelope differences
+  are now a `kind:` enum parameter; the legacy methods stay as thin
+  shims to minimise call-site churn.
+- **`OpenAIErrorBody` / `OpenAIErrorPayload` moved to MoxShared** so
+  the dispatcher and the channel-read early-exit paths share the same
+  wire types.
+
+### Fixed
+
+- The build now compiles. A previous partial refactor had left
+  `MoxHTTPHandler.channelInactive` and `finishPending` in a broken
+  state; the file now has both declarations back and the class closes
+  properly. Smoke tests confirm the four endpoints (`/health`,
+  `/v1/chat/completions`, `/v1/embeddings`, `/v1/messages`) plus
+  404 routing all work end-to-end.
+
 ## v0.8.0 — 工具调用 + 兼容性分级 + 增量下载
 
 ### Added

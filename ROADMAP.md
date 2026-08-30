@@ -163,7 +163,26 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 ---
 
-## v0.9 — KV 缓存 + 性能
+## v0.9 — 格式转换 + KV 缓存 + 性能
+
+### 9.0 `mox convert` + `mox re-quantize` CLI
+
+**动机**：现在 `mox pull Qwen/Qwen2.5-7B-Instruct` 只能拿到 14 GB bf16 原始权重，要么强迫用户自己用 Python 工具转 MLX 4-bit，要么就硬吃 14 GB 跑（慢、内存高）。这两条都违背 DESIGN §0 "Mox 不引入 Python 依赖"——前者把用户赶到 Python，后者逼 mox 启动吃 14 GB。`mox convert` 一行命令搞定。
+
+**做法**（DESIGN §15.2.1 的目标，v0.9 落地）：
+- `MLXNN.quantize(model:groupSize:bits:mode:)` 把已加载的 MLX Module 量化成 4-bit / 8-bit / mxfp4 / mxfp8。
+- `Module.parameters().flattened(prefix:)` 把 nested dict 拍平成 `[String: MLXArray]`。
+- `MLX.save(arrays:metadata:url:stream:)` 写 `.safetensors` 到本地 `~/.mox/models/<id>/`。
+- `mox convert <hf-id> --q-bits 4 --q-group-size 64 --mode affine` 串起 load → quantize → save。
+- `mox re-quantize <local-model> --bits 8` 复用同一 pipeline 改 bit width。
+- `mox pull` 检测 config.json 无 `quantization_config` 字段时自动触发 `mox convert`（DESIGN §15.3 路径 B）。
+
+**验证**：
+- 拉 `Qwen/Qwen2.5-0.5B-Instruct`（bf16 ~1 GB）→ `mox convert --q-bits 4` → 本地应有 ~500 MB safetensors 文件。再次加载时**直接走 MLX 量化路径**，无 1 GB 内存占用。
+- `mox re-quantize mlx-community/X-4bit --bits 8` → 8-bit 权重 → 重新加载 OK。
+- 端到端 chat completion smoke：bf16 原始模型 → convert → 加载 → token 输出非空、stop_reason="stop"。
+
+**不做**：custom apply 函数（DESIGN §15.2.1 的 `quantize` 第三个重载，留给需要 per-layer 自定义配置的极小众场景）；MLX-Python 的 AWQ / GPTQ 算法（mlx-swift 没暴露）；跨量化格式互转（`mlx-community` 转 `MLX` 已有 `--quant-palette` 之类工具，不是 mox 的责任）。
 
 ### 9.1 Prefix hash + block sharing in RAM
 
@@ -289,10 +308,7 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 - **MTPLX `sustained` / `turbo` / `sustained_max` 等 profile 抽象**：v0.9 硬件感知 default 已经覆盖 90% 场景，余下让用户配置。
 - **omlx settings.py 67k 行**：Python 单文件膨胀的反面教材，Swift module 拆分避免。
 - **MTPLX 强制 attribution clause**：mox MIT 更友好。
-- **omlx `[mcp]` extras**：等用户真要再说。
-## 调研纠正（v0.8 之后）
 
-- **~~"等上游 MLX.nn.Module → safetensors API"~~**：v0.7 时判断错误。mlx-swift 0.31.6 已有完整 pipeline：`MLXNN.quantize(model:groupSize:bits:mode:)` → `Module.parameters().flattened()` → `MLX.save(arrays:metadata:url:stream:)` 写 .safetensors。零 Python 依赖。v0.9 应上 `mox convert` / `mox re-quantize`。
 ---
 
 ## 保留的 Swift 优势

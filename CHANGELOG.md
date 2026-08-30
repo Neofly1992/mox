@@ -2,30 +2,23 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
-## v0.8.2 — 上游调研纠正
+## v0.9.0 — `mox convert` + `mox re-quantize` (planned)
 
-### Fixed
+`mox convert` ships in v0.9. The backend is already in the dependency
+graph (mlx-swift 0.31.6, the version mox pins today):
+- `MLXNN.quantize(model:groupSize:bits:mode:filter:apply:)` quantizes
+  a Module to 4-bit / 8-bit / mxfp4 / mxfp8.
+- `Module.parameters().flattened(prefix:)` flattens the nested
+  parameter dict to `[String: MLXArray]`.
+- `MLX.save(arrays:metadata:url:stream:)` writes `.safetensors` on disk.
 
-- **Re-evaluated the deferred "MLX.nn.Module → safetensors" gap from
-  v0.7.** The pipeline needed for `mox convert` / `mox re-quantize`
-  (DESIGN §15.2.1) is **already shipped in mlx-swift 0.31.6**, which is
-  the version mox currently pins:
-  - `MLXNN.quantize(model:groupSize:bits:mode:filter:apply:)` quantizes a
-    Module to 4-bit / 8-bit / mxfp4 / mxfp8.
-  - `Module.parameters()` returns a `NestedDictionary<String, MLXArray>`
-    that calls `.flattened(prefix:)` to get the flat
-    `[String: MLXArray]` the writer expects.
-  - `MLX.save(arrays:metadata:url:stream:)` writes
-    `[String: MLXArray]` to `.safetensors` on disk.
-
-  This means `mox convert` was deferred on a wrong premise — the
-  Swift backend was always there. v0.9 should ship `mox convert`
-  (HF bf16 / fp16 / fp32 → quantized MLX safetensors) and
-  `mox re-quantize` (existing MLX → different bit width). Pure Swift,
-  no Python dependency, faithful to DESIGN §0.
+Until v0.9, `mox pull Qwen/Qwen2.5-7B-Instruct` downloads 14 GB bf16
+weights and either forces the user to convert via Python tools or
+runs the model at full bf16 footprint. Both fail DESIGN §0 ("Mox
+does not introduce a Python dependency"). v0.9 fixes this by
+wiring the three calls above into a single CLI command.
 
 ## v0.8.1 — Code-quality audit fixes
-### Changed
 
 - **Server.swift dispatch is now table-driven** (`HTTPRouter.routes`):
   new endpoints add one line, no edits to the dispatcher.
@@ -39,14 +32,15 @@ v0.x releases may include breaking protocol changes documented inline.
   the dispatcher and the channel-read early-exit paths share the same
   wire types.
 
-### Fixed
+### Notes
 
-- The build now compiles. A previous partial refactor had left
-  `MoxHTTPHandler.channelInactive` and `finishPending` in a broken
-  state; the file now has both declarations back and the class closes
-  properly. Smoke tests confirm the four endpoints (`/health`,
-  `/v1/chat/completions`, `/v1/embeddings`, `/v1/messages`) plus
-  404 routing all work end-to-end.
+- v0.8.0's `Server.swift` shipped with a partial refactor that left
+  `MoxHTTPHandler.channelInactive` and `finishPending` declarations
+  missing; tests passed because the test target didn't compile
+  `Server.swift`. v0.8.1 restores both declarations and confirms the
+  four endpoints (`/health`, `/v1/chat/completions`,
+  `/v1/embeddings`, `/v1/messages`) plus 404 routing work
+  end-to-end via real-machine smoke.
 
 ## v0.8.0 — 工具调用 + 兼容性分级 + 增量下载
 

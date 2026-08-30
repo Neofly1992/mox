@@ -2,9 +2,29 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
+## v0.8.2 — 上游调研纠正
+
+### Fixed
+
+- **Re-evaluated the deferred "MLX.nn.Module → safetensors" gap from
+  v0.7.** The pipeline needed for `mox convert` / `mox re-quantize`
+  (DESIGN §15.2.1) is **already shipped in mlx-swift 0.31.6**, which is
+  the version mox currently pins:
+  - `MLXNN.quantize(model:groupSize:bits:mode:filter:apply:)` quantizes a
+    Module to 4-bit / 8-bit / mxfp4 / mxfp8.
+  - `Module.parameters()` returns a `NestedDictionary<String, MLXArray>`
+    that calls `.flattened(prefix:)` to get the flat
+    `[String: MLXArray]` the writer expects.
+  - `MLX.save(arrays:metadata:url:stream:)` writes
+    `[String: MLXArray]` to `.safetensors` on disk.
+
+  This means `mox convert` was deferred on a wrong premise — the
+  Swift backend was always there. v0.9 should ship `mox convert`
+  (HF bf16 / fp16 / fp32 → quantized MLX safetensors) and
+  `mox re-quantize` (existing MLX → different bit width). Pure Swift,
+  no Python dependency, faithful to DESIGN §0.
 
 ## v0.8.1 — Code-quality audit fixes
-
 ### Changed
 
 - **Server.swift dispatch is now table-driven** (`HTTPRouter.routes`):

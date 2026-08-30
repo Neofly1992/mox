@@ -290,7 +290,9 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 - **omlx settings.py 67k 行**：Python 单文件膨胀的反面教材，Swift module 拆分避免。
 - **MTPLX 强制 attribution clause**：mox MIT 更友好。
 - **omlx `[mcp]` extras**：等用户真要再说。
+## 调研纠正（v0.8 之后）
 
+- **~~"等上游 MLX.nn.Module → safetensors API"~~**：v0.7 时判断错误。mlx-swift 0.31.6 已有完整 pipeline：`MLXNN.quantize(model:groupSize:bits:mode:)` → `Module.parameters().flattened()` → `MLX.save(arrays:metadata:url:stream:)` 写 .safetensors。零 Python 依赖。v0.9 应上 `mox convert` / `mox re-quantize`。
 ---
 
 ## 保留的 Swift 优势

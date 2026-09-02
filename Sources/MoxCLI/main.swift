@@ -85,6 +85,7 @@ struct MoxCLI {
     static func handlePull(args: [String]) async throws {
         var modelId: String?
         var source: ModelSource = .huggingface
+        var autoQuantize = true
 
         var i = 0
         while i < args.count {
@@ -110,6 +111,13 @@ struct MoxCLI {
                 if i < args.count {
                     modelId = args[i]
                 }
+            case "--no-auto-quantize":
+                // v0.9 — opt out of the bf16→4-bit auto-convert that
+                // runs after a successful pull. Useful when the user
+                // wants full precision (e.g. for benchmarks) or when
+                // their machine can't afford the extra peak memory
+                // that `mox convert` adds on top of the download.
+                autoQuantize = false
             default:
                 if modelId == nil {
                     modelId = args[i]
@@ -120,7 +128,7 @@ struct MoxCLI {
 
         guard let id = modelId else {
             moxPrint("Error: Model ID required")
-            moxStderr("Usage: mox pull <model-id> [--source huggingface|modelscope]")
+            moxStderr("Usage: mox pull <model-id> [--source huggingface|modelscope] [--no-auto-quantize]")
             return
         }
 
@@ -140,10 +148,93 @@ struct MoxCLI {
             moxPrint("\nSuccessfully pulled model: \(modelInfo.name)")
             moxPrint("Size: \(modelInfo.sizeDescription)")
             moxPrint("Location: \(modelInfo.path)")
+
+            // v0.9 — auto-convert hook (DESIGN §15.3 path B). Runs
+            // *after* `pullModel` returns so the actor's executor
+            // isn't held during the heavy quantize pass. Caller has
+            // the option to opt out via `--no-auto-quantize`.
+            if autoQuantize {
+                await maybeAutoQuantize(modelInfo: modelInfo)
+            }
         } catch {
             moxStderr("Error pulling model: \(error.localizedDescription)")
         }
     }
+
+    /// Inspect the just-pulled directory and, if it's raw HF precision
+    /// (bf16/fp16/fp32), produce a sibling 4-bit MLX copy and rewrite
+    /// its manifest so subsequent `mox run` lands on the quantized
+    /// weights. Existing `.mlxQuantized` models are skipped — they're
+    /// already ready. Unknown formats are left untouched (the raw
+    /// directory still works for any future tooling that wants to
+    /// inspect it).
+    ///
+    /// Failures are non-fatal: if quantize errors out, the user still
+    /// has the raw weights. We surface the error to stderr so they
+    /// know to run `mox convert` manually if they want MLX format.
+    private static func maybeAutoQuantize(modelInfo: ModelInfo) async {
+        let sourceURL = URL(fileURLWithPath: modelInfo.path)
+        let probe: ModelProbe
+        do {
+            probe = try MoxConverter().inspect(at: sourceURL)
+        } catch {
+            moxStderr("Auto-quantize: probe failed (\(error.localizedDescription)). Skipping.")
+            return
+        }
+        guard case .hfPrecision = probe else {
+            // Already quantized, or unknown — nothing to do.
+            return
+        }
+
+        let bits = 4
+        let groupSize = 64
+        let mode: QuantizationMode = .affine
+        let quantURL = sourceURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("\(sourceURL.lastPathComponent)-\(bits)bit")
+        let options = QuantizationOptions(
+            bits: bits,
+            groupSize: groupSize,
+            mode: mode,
+            outputDirectory: quantURL
+        )
+        moxPrint("Auto-quantizing bf16 → \(bits)-bit MLX (group=\(groupSize), mode=\(mode))…")
+        let bytesWritten: Int64
+        do {
+            bytesWritten = try await MoxQuant.quantize(sourceDirectory: sourceURL, options: options)
+        } catch {
+            moxStderr("Auto-quantize failed: \(error.localizedDescription). Raw weights at \(sourceURL.path) are still usable.")
+            return
+        }
+
+        // Rewrite the manifest in the *quantized* directory so
+        // `mox run` / `mox list` see it as MLX-quantized, not raw HF.
+        // We copy the original manifest's id/source/originalId and
+        // flip sourceFormat + populate quantization.
+        do {
+            var manifest = try await ModelManager.shared.readManifest(at: sourceURL)
+                ?? ModelManifest(
+                    id: modelInfo.id,
+                    source: modelInfo.source,
+                    originalId: modelInfo.id,
+                    sourceFormat: "mlx-\(bits)bit-\(mode)",
+                    quantization: MoxQuantizationInfo(bits: bits, groupSize: groupSize, mode: "\(mode.rawValue)")
+                )
+            manifest.sourceFormat = "mlx-\(bits)bit-\(mode)"
+            manifest.quantization = MoxQuantizationInfo(bits: bits, groupSize: groupSize, mode: "\(mode.rawValue)")
+            let data = try JSONEncoder().encode(manifest)
+            try data.write(to: quantURL.appendingPathComponent("mox.json"), options: [.atomic])
+        } catch {
+            // The safetensors are on disk; the manifest update is the
+            // cheap part. Don't fail the whole pull — just warn.
+            moxStderr("Auto-quantize: could not rewrite manifest (\(error.localizedDescription)).")
+        }
+
+        let sizeStr = ByteCountFormatter.string(fromByteCount: bytesWritten, countStyle: .file)
+        moxPrint("✓ quantized \(sizeStr) → \(quantURL.path)")
+        moxPrint("Serve with: mox run \(quantURL.lastPathComponent)")
+    }
+
 
     static func handleList(args: [String]) async throws {
         let modelManager = ModelManager.shared

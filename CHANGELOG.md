@@ -2,7 +2,7 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
-## v0.9.0 — `mox convert` + `mox re-quantize` (in progress)
+## v0.9.0 — `mox convert` + `mox re-quantize` + pull auto-quantize (2026-09)
 
 ### Added (shipped)
 
@@ -20,12 +20,22 @@ v0.x releases may include breaking protocol changes documented inline.
 - **`mox re-quantize <dir> [--q-bits N] [--q-group-size N]`** —
   CLI wrapper that re-runs the same pipeline on an already-installed
   MLX model directory to flip 4-bit ↔ 8-bit. Aliases: `requantize`.
-
-### Pending (next steps in this session)
-
-- `mox pull` auto-detect bf16 / fp16 / fp32 (already classifies via
-  `MoxConverter.inspect`) and trigger `mox convert` instead of
-  loading at full precision. Implements `DESIGN §15.3` path B.
+- **`mox pull` auto-quantizes bf16 / fp16 / fp32 to 4-bit MLX** —
+  after a successful pull, `handlePull` inspects the destination
+  directory and, if `MoxConverter` classifies it as HF precision,
+  kicks off `MoxQuant.quantize` against a `<dir>-4bit/` sibling.
+  The new sibling gets a rewritten `mox.json` with
+  `sourceFormat = "mlx-4bit-affine"` and a populated
+  `quantization = MoxQuantizationInfo(bits:4, groupSize:64, mode:"affine")`
+  so subsequent `mox run` lands on the quantized weights. The raw
+  HF directory is left untouched. Opt out with `--no-auto-quantize`
+  for users who want full precision or whose machines can't afford
+  the extra peak memory.
+- **`Tests/MoxCoreTests/MoxQuantIntegrationTests.swift`** — 4 tests
+  pin the contract around `MoxQuant.quantize`: output directory is
+  created, the loader's failure on an invalid model is surfaced as a
+  typed error rather than a trap, and missing-source paths are
+  rejected cleanly. No real weights needed in CI.
 
 ### Background (the design rationale)
 
@@ -41,7 +51,20 @@ Until v0.9, `mox pull Qwen/Qwen2.5-7B-Instruct` downloads 14 GB bf16
 weights and either forces the user to convert via Python tools or
 runs the model at full bf16 footprint. Both fail DESIGN §0 ("Mox
 does not introduce a Python dependency"). v0.9 fixes this by
-wiring the three calls above into a single CLI command.
+wiring the three calls above into a single CLI command, plus the
+`mox pull` auto-quantize hook so the user never has to run a second
+command manually.
+
+---
+
+## v0.9.0 onwards — next
+
+The next three big lifts land in **v1.0.0**; see ROADMAP for details:
+- Continuous batching (§9.2)
+- Reasoning / thinking budget (§9.3)
+- Paged SSD cold tier (§10.1)
+
+
 
 ## v0.8.1 — Code-quality audit fixes
 

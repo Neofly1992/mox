@@ -322,42 +322,55 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 不为对齐竞品丢这些。
 ---
 
-## 下次会话从这里开始（v0.9.0 续做）
+## 下次会话从这里开始（v0.9.0 续做 #2）
 
-**已完成**：
+**已完成**（v0.9.0 第一波）：
 - `Sources/MoxConvertCore/MoxQuant.swift` —— `MoxQuant.quantize(sourceDirectory:options:)` 核心 pipeline 实装。
-- `Tests/MoxCoreTests/MoxQuantTests.swift` —— 3 个测试 pin `QuantizationOptions` contract。
+- `Sources/MoxCLI/main.swift` —— `mox convert` / `mox re-quantize` / `requantize` 三个 dispatch + `handleConvert` + `handleRequantize` + `printConvertHelp` + `directorySize` 帮助函数；`printHelp` 加新命令和示例。
+- `CHANGELOG.md` v0.9.0 "Added (shipped)" 收 CLI 两条。
 - `swift build` + `swift test` 全绿（132 tests pass）。
 
-**下一个目标**：把 `mox convert` CLI 子命令接到 `MoxQuant.quantize`，让用户能 `mox convert Qwen/Qwen2.5-7B-Instruct --q-bits 4 --q-group-size 64` 直接产出 4-bit 量化版。
+**v0.9.0 续做 #2 目标**：补 §9.0 步骤 5/6 —— (a) 集成测试覆盖 `MoxQuant.quantize` 全流程；(b) `mox pull` 后置钩子自动把 bf16/fp16/fp32 转 4-bit，manifest 写明量化 provenance。这两块收掉后，v0.9.0 才能 tag。
 
 **具体步骤**（按顺序做，每个 ~30 分钟）：
 
-1. 在 `Sources/MoxCLI/main.swift` 的 dispatch switch 加 `case "convert"` + `case "re-quantize"`，调用 `static func handleConvert(args:)` / `handleRequantize(args:)`。
-2. `handleConvert(args:)` 实现：
-   - 参数解析：`--q-bits` (默认 4)、`--q-group-size` (默认 64)、`--mode` (默认 affine，可选 mxfp4 / mxfp8)、`--output` (默认 `~/.mox/models/<id>/`)。
-   - 第一个非 flag 参数是 HF id 或本地路径；本地路径直接用，HF id 需要先 `mox pull`（先 `ModelManager.shared.pullModel(...)`，但 v0.9 这一步先支持本地路径，HF id 留 TODO）。
-   - 构造 `QuantizationOptions`，调 `MoxQuant.quantize(...)`，打印 "✓ saved 3.4 GB → ~/.mox/models/<id>/model.safetensors" 类输出。
-3. `handleRequantize(args:)` 实现类似但参数更少（只有一个 `--bits`），假设本地路径已含已量化的 model.safetensors（先 v0.9 留 TODO — 要先 detect 当前 bit width 才能 re-quantize）。
-4. 在 `Sources/MoxCLI/main.swift` 顶部 help 文案加 `mox convert` / `mox re-quantize` 用法。
-5. 加一个真实目录的 smoke（用空目录 + config.json + 一个 dummy 权重文件，调 `mox convert` 看是否能跑通 pipeline；或者加一个 `MoxCoreTests/MoxQuantIntegrationTests.swift` 用临时目录跑全流程）。
-6. `mox pull` 的 bf16 自动触发 —— 在 `ModelManager.pullModel(...)` 成功后，调 `MoxConverter.inspect(at:)`，如果是 `.hfPrecision`，调 `MoxQuant.quantize(...)` 然后改写 manifest 的 `sourceFormat = "mlx-4bit"` 之类的字段。
-7. 写 CHANGELOG v0.9.0 "Added" 节：把 CLI / pull integration 都列上。
+1. **`Tests/MoxCoreTests/MoxQuantIntegrationTests.swift`** —— 临时目录 + 假 `config.json`（model_type=torch_dtype=bfloat16）+ dummy `.safetensors`，调 `MoxQuant.quantize(...)` 跑全流程。期望：
+   - 真实 MLX model container 加载会失败（缺 hidden_size 等真实字段），但失败必须是**结构化的 loader 错误**，不是 panic / trap。
+   - 验证 `QuantizationOptions.outputDirectory` 目录被创建。
+   - 这是 CI 烟雾，不是真量化产物验证（真产需要真权重）。
+2. **`Sources/MoxConvertCore/MoxQuant.swift`** —— 让 `MoxQuant.quantize` 写入 output 目录时，**在 `config.json` 里塞入 `quantization_config`** 字段（`{"group_size": ..., "bits": ...}`）。这样：
+   - 下次 `MoxConverter.inspect(at:)` 在该目录上能正确归类为 `.mlxQuantized`。
+   - 不影响 mlx-swift-lm 加载（上游靠 weights 里的 `.scales` 判定，不是 config.json 字段），但**与生态约定一致**。
+3. **`Sources/MoxCLI/main.swift` 的 `handlePull`** —— pull 成功后：
+   - 调 `MoxConverter().inspect(at: destinationDir)`。
+   - 若 `.hfPrecision(let dtype)` → 默认 4-bit/64/affine 触发 `MoxQuant.quantize(...)` 到 sibling `<dir>-4bit/`；更新 `ModelInfo.path` 指 quantized 目录；改写 manifest 的 `sourceFormat = "mlx-<bits>bit-<mode>"`、`quantization = MoxQuantizationInfo(...)`。
+   - 若 `.mlxQuantized` → 跳过，**已经 quantized 直接用**。
+   - 若 `.unknown` → 不动，保留 v0.5 行为（manifest 里写 "unknown(...)"）。
+   - **分离关注点**：`handlePull` 串两步，**不在 `ModelManager.pullModel` 内部嵌套**。原因：`pullModel` 是 actor 内的纯 I/O，convert 是重计算（内存密集），挂上会让 model manager 难测、难 retry。
+4. **新 flag**：`mox pull --no-auto-quantize` —— 跳过自动 convert，给想要手动控制的人留口子（默认开，opt-out）。
+5. **CHANGELOG v0.9.0**：
+   - "Added (shipped)" 加 `mox pull --no-auto-quantize`、集成测试条目。
+   - "Pending" 段删掉（v0.9.0 已全收）。
+   - 顶部版本标题从 `(in progress)` 改 `(2026-09)`，或者干脆加 `v0.9.0` tag 再写 release notes。
+6. **commit + push**。
 
 **关键文件**：
-- `Sources/MoxCLI/main.swift` —— CLI dispatch + handler
-- `Sources/MoxCore/ModelManager.swift` —— pull 完成后的 integration hook
-- `Sources/MoxShared/Models.swift` —— `ModelManifest.sourceFormat` 字段可能需要新枚举值
+- `Sources/MoxConvertCore/MoxQuant.swift` —— 写入 `config.json` 增量。
+- `Sources/MoxCLI/main.swift` —— `handlePull` 增量 + `--no-auto-quantize` 解析。
+- `Sources/MoxCore/ModelManager.swift` —— **不改**。`pullModel` 边界不变；convert 在 `handlePull` 这一层串。
+- `Sources/MoxShared/Models.swift` —— `ModelManifest.quantization: MoxQuantizationInfo?` 字段已经存在，直接复用。`sourceFormat` 是 String 不动，新值 `mlx-4bit-affine` 写进去即可。
+- `Tests/MoxCoreTests/MoxQuantIntegrationTests.swift` —— 新文件。
 
 **注意点**：
-- `MoxQuant.quantize` 需要真实模型在磁盘上才能跑通——CI smoke 用空目录 + config.json + dummy.safetensors 即可验证 pipeline 不崩，但真实量化产物需要真模型。
-- `mox pull` 接 `convert` 时**先**确认 `pullModel` 完成后**再**触发 convert；不要在 `pullModel` 内部嵌套——分离关注点。
-- v0.9 不做：HF id 触发 convert 的路径（要解析 HuggingFace 重定向等）；re-quantize 的 bit-width 检测（要读 metadata）。
-- 用户体验：convert 后 model size 减少，应该打印 "before/after" 对比——量化前文件总字节 vs 量化后 model.safetensors 字节。
+- **不要在 `pullModel` 内部调 `MoxQuant.quantize`** —— 那是 actor 内，convert 是重计算 + 大内存分配，把 actor 卡住会让所有并发的 `listModels` / `modelInfo` 都阻塞。`handlePull` 是 `async throws` 的函数，串两步最自然。
+- `MoxQuant.quantize` 的输入是 `sourceDirectory`，写 `config.json` 之前要小心：源目录可能是同一个用户目录（`mox convert` 时），也可能不是（`mox pull` 时源 = pull 出的目录，输出 = `<dir>-4bit/` sibling）。**只写 outputDirectory 的 config.json，不动 sourceDirectory**。
+- bf16 → 4-bit 默认触发 = 用户可能不想要（16 GB 内存紧的机器上转 7B 可能挂）。但 `mox pull` 文档默认就是 "给你一个能用的模型"，不量化就不能用 —— 默认开是合理的，opt-out 已经设计。
+- v0.9 不做：HF id 触发 convert 的路径（即直接 `mox convert Qwen/X` 不经过 `mox pull`，要解析 HF 重定向等）；re-quantize 的 bit-width 检测（要读 weights metadata）。
 
 **验证 checklist**（完成后 grep）：
-- [ ] `mox convert` 在 `Sources/MoxCLI/main.swift` dispatch 里
-- [ ] `mox convert ./fake-dir --q-bits 4` 不崩（打印错误信息清晰）
-- [ ] `mox convert ./real-qwen-model --q-bits 4` 真跑通（人工 smoke）
-- [ ] `mox pull` 在 bf16 模型后自动触发 convert（人工 smoke）
-- [ ] 132+ 测试全过
+- [ ] `MoxQuantIntegrationTests` 在 `Tests/MoxCoreTests/` 下，3+ 测试
+- [ ] `mox convert` 写出的目录的 `config.json` 含 `quantization_config`
+- [ ] `mox pull Qwen/Qwen2.5-0.5B-Instruct --source huggingface`（用 tiny fixture 或者断网 mock）后，`destinationDir` 的 `mox.json` `sourceFormat = "mlx-4bit-affine"`，且 sibling `<id>-4bit/` 存在 model.safetensors
+- [ ] `mox pull --no-auto-quantize` 不触发 convert，manifest 保留 `huggingface-bfloat16`
+- [ ] CHANGELOG v0.9.0 "Pending" 段为空，顶部日期填上
+- [ ] 132+3 = 135+ 测试全过

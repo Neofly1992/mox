@@ -670,10 +670,20 @@ struct MoxCLI {
             return
         }
         let localDir = URL(fileURLWithPath: info.path)
-        let fetcher = HuggingFaceInventoryFetcher()
+        // Pick the inventory fetcher that matches where this model
+        // was pulled from. mlx-community shares HF's protocol.
+        let fetcher: RemoteInventoryFetcher
+        switch info.source {
+        case .modelscope:
+            fetcher = ModelScopeInventoryFetcher()
+        case .huggingface, .mlxCommunity, .unknown:
+            // unknown falls through to HF: legacy installs pre-date
+            // the source field and the only sane inventory probe is
+            // to try HF first.
+            fetcher = HuggingFaceInventoryFetcher()
+        }
         let downloader = ResumableDownloader()
         let updater = ModelUpdater(fetcher: fetcher, downloader: downloader)
-        moxPrint("Checking for updates to \(modelId)…")
         do {
             let plan = try await updater.update(
                 modelId: modelId,

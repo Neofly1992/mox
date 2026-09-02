@@ -2,7 +2,19 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
-## v0.8.3 — `mox update` 闭环（2026-09）
+## v0.8.4 — `mox update` 支持 ModelScope (2026-09)
+
+### Added
+
+- **`ModelScopeInventoryFetcher`**：`Sources/MoxCore/ModelScopeInventoryFetcher.swift`，实现 `RemoteInventoryFetcher` 协议。Wire endpoint `https://modelscope.cn/api/v1/models/{repo_id}/repo/files?Recursive=True&Revision={rev}`，返回 `{Code, Data:{Files:[{Path,Size,Sha256,...}], Revision}}`。`Revision` 顶层字段映射到 `RemoteModelInventory.revision`（commit hash pin），`Files[]` → `[RemoteFileEntry]`。
+- **`handleUpdate` 按 source 分派 fetcher**：根据 `ModelInfo.source`（HF / mlx-community / ModelScope / unknown）选 `HuggingFaceInventoryFetcher` 还是 `ModelScopeInventoryFetcher`。`mlx-community` 复用 HF（同协议），`unknown` legacy install 兜底用 HF。
+- **`ModelScopeInventoryFetcher.parse(_:modelId:)`**：纯 wire→inventory 解码函数，公开以便测试。`fetch` 走完 HTTP 层后直接调它，避免在测试里 stub `URLSession`。
+
+### Tests
+
+- **`Tests/MoxCoreTests/ModelScopeInventoryFetcherTests.swift`**：5 个测试覆盖单文件解码、`Size as NSNumber` 路径（JSONSerialization 默认写 NSNumber）、缺失 revision/sha256 容错、缺失 Path/Size 丢弃条目、非 `{Code,Data}` 信封拒收。无网络依赖，CI 友好。
+
+## v0.8.3 — `mox update` 闭环
 
 ### Fixed
 

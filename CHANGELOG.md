@@ -2,7 +2,32 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
-## v0.9.0 — `mox convert` + `mox re-quantize` (planned)
+## v0.9.0 — `mox convert` + `mox re-quantize` (in progress)
+
+### Added (shipped)
+
+- **`MoxConvertCore.MoxQuant.quantize(sourceDirectory:options:)`** —
+  pure-Swift pipeline that takes a HF bf16 / fp16 / fp32 model
+  directory and writes a quantised MLX safetensors sibling. Wires
+  the three upstream primitives — `MLXNN.quantize`,
+  `Module.parameters().flattened`, `MLX.save(arrays:url:stream:)` —
+  through `MLXLMCommon.loadModelContainer`. No Python, no subprocess.
+- **`mox convert <dir> [--q-bits N] [--q-group-size N] [--mode M] [--output DIR]`** —
+  CLI wrapper around `MoxQuant.quantize`. Flags default to the MLX
+  defaults (4-bit, group 64, affine). Output defaults to a sibling
+  `<dir>-<bits>bit/` so the source is preserved. Prints a
+  before/after byte delta on success.
+- **`mox re-quantize <dir> [--q-bits N] [--q-group-size N]`** —
+  CLI wrapper that re-runs the same pipeline on an already-installed
+  MLX model directory to flip 4-bit ↔ 8-bit. Aliases: `requantize`.
+
+### Pending (next steps in this session)
+
+- `mox pull` auto-detect bf16 / fp16 / fp32 (already classifies via
+  `MoxConverter.inspect`) and trigger `mox convert` instead of
+  loading at full precision. Implements `DESIGN §15.3` path B.
+
+### Background (the design rationale)
 
 `mox convert` ships in v0.9. The backend is already in the dependency
 graph (mlx-swift 0.31.6, the version mox pins today):

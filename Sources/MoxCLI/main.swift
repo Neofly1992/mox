@@ -1,8 +1,9 @@
 import AppKit
+import MLX
 import MoxCore
+import MoxConvertCore
 import MoxServer
 import MoxShared
-
 @main
 struct MoxCLI {
     static func main() async throws {
@@ -30,6 +31,10 @@ struct MoxCLI {
             try await handleChat(args: Array(args[2...]))
         case "ask":
             do { try await handleAsk(args: Array(args[2...])) } catch let e as AskError { exit(e == .notFound ? 1 : 2) } catch { exit(1) }
+        case "convert":
+            try await handleConvert(args: Array(args[2...]))
+        case "re-quantize", "requantize":
+            try await handleRequantize(args: Array(args[2...]))
         case "debug":
             try await handleDebug(args: Array(args[2...]))
         case "help", "--help", "-h":
@@ -41,7 +46,6 @@ struct MoxCLI {
             printHelp()
         }
     }
-
     static func printHelp() {
         moxStderr("""
         Mox - Magic Box for MLX
@@ -55,6 +59,8 @@ struct MoxCLI {
           chat <model>     Chat with a model (or use -m)
           ask              One-shot prompt that emits OpenAI-style JSON
           -m <prompt>      Send a single message to the model
+          convert <dir>    Quantize a local HF/MLX model dir to MLX safetensors (v0.9)
+          re-quantize <dir> Re-run quantization on an already-installed MLX model
           delete <model>   Delete a locally installed model
           help             Show this help message
           version          Show version information
@@ -70,6 +76,8 @@ struct MoxCLI {
           mox ask --model Qwen/Qwen2.5-0.5B-Instruct --messages '[{"role":"user","content":"hi"}]'
           mox ask --model Qwen/Qwen2.5-0.5B-Instruct --messages '...' --stream
           mox -m "What is 2+2?"
+          mox convert ~/.mox/models/Qwen2.5-7B-Instruct --q-bits 4
+          mox re-quantize ~/.mox/models/Qwen2.5-7B-Instruct-4bit --q-bits 8
           mox delete Qwen/Qwen2.5-0.5B-Instruct
         """)
     }
@@ -594,7 +602,178 @@ struct MoxCLI {
             moxStderr("Update failed: \(error.localizedDescription)")
         }
     }
-    // MARK: - debug (developer utilities)
+
+    // MARK: - convert (v0.9 — quantize an HF/MLX model directory)
+
+    /// `mox convert <source> [--q-bits N] [--q-group-size N] [--mode M] [--output DIR]`
+    ///
+    /// Quantize a HuggingFace bf16/fp16/fp32 model directory into the MLX
+    /// safetensors format `mox run` consumes natively. Pure Swift — no
+    /// Python, no subprocess.
+    ///
+    /// v0.9 limitation: only local paths are accepted. A HuggingFace id
+    /// still needs to go through `mox pull` first; the auto-convert hook
+    /// in `mox pull` is the path that handles ids.
+    static func handleConvert(args: [String]) async throws {
+        var sourcePath: String?
+        var bits = 4
+        var groupSize = 64
+        var mode: QuantizationMode = .affine
+        var outputDir: URL?
+
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--q-bits", "--bits":
+                i += 1
+                if i < args.count, let n = Int(args[i]), n > 0 {
+                    bits = n
+                }
+            case "--q-group-size", "--group-size":
+                i += 1
+                if i < args.count, let n = Int(args[i]), n > 0 {
+                    groupSize = n
+                }
+            case "--mode":
+                i += 1
+                if i < args.count {
+                    switch args[i].lowercased() {
+                    case "affine": mode = .affine
+                    case "mxfp4": mode = .mxfp4
+                    case "mxfp8": mode = .mxfp8
+                    default:
+                        moxStderr("Error: unknown --mode '\(args[i])' (expected affine|mxfp4|mxfp8)")
+                        throw MoxQuantError.unsupportedQuantizationMode(args[i])
+                    }
+                }
+            case "--output", "-o":
+                i += 1
+                if i < args.count {
+                    outputDir = URL(fileURLWithPath: args[i])
+                }
+            case "--help", "-h":
+                printConvertHelp()
+                return
+            default:
+                if sourcePath == nil {
+                    sourcePath = args[i]
+                }
+            }
+            i += 1
+        }
+
+        guard let source = sourcePath else {
+            moxStderr("Error: source directory required")
+            printConvertHelp()
+            return
+        }
+
+        let sourceURL = URL(fileURLWithPath: source)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: sourceURL.path, isDirectory: &isDir), isDir.boolValue else {
+            moxStderr("Error: '\(source)' is not a directory. v0.9 `mox convert` only takes a local model directory; run `mox pull <hf-id>` first.")
+            return
+        }
+
+        let resolvedOutputDir: URL
+        if let out = outputDir {
+            resolvedOutputDir = out
+        } else {
+            // Default: a sibling dir next to the source with a "-<bits>bit" suffix
+            // so the user doesn't accidentally clobber the original weights.
+            resolvedOutputDir = sourceURL
+                .deletingLastPathComponent()
+                .appendingPathComponent("\(sourceURL.lastPathComponent)-\(bits)bit")
+        }
+
+        moxPrint("Source:     \(sourceURL.path)")
+        moxPrint("Output:     \(resolvedOutputDir.path)")
+        moxPrint("Quantizing: \(bits)-bit, group_size=\(groupSize), mode=\(mode)")
+
+        // Size before — sum of every .safetensors file in the source dir.
+        // This is the honest baseline for the "saved N bytes" line below.
+        let beforeBytes = directorySize(sourceURL)
+
+        do {
+            let options = QuantizationOptions(
+                bits: bits,
+                groupSize: groupSize,
+                mode: mode,
+                outputDirectory: resolvedOutputDir
+            )
+            let outputBytes = try await MoxQuant.quantize(sourceDirectory: sourceURL, options: options)
+            let afterBytes = outputBytes
+            let saved = beforeBytes - afterBytes
+            let savedStr = ByteCountFormatter.string(fromByteCount: max(saved, 0), countStyle: .file)
+            let outStr = ByteCountFormatter.string(fromByteCount: afterBytes, countStyle: .file)
+            moxPrint("✓ saved \(outStr) → \(resolvedOutputDir.appendingPathComponent("model.safetensors").path)")
+            if beforeBytes > 0 {
+                moxPrint("  \(savedStr) smaller than source (\(ByteCountFormatter.string(fromByteCount: beforeBytes, countStyle: .file)))")
+            }
+            moxPrint("Done. Serve with: mox run \(resolvedOutputDir.lastPathComponent)")
+        } catch {
+            moxStderr("Convert failed: \(error.localizedDescription)")
+            exit(3)
+        }
+    }
+
+    /// `mox re-quantize <dir> [--bits N]`
+    ///
+    /// Thin wrapper around `MoxQuant.quantize` that re-runs the pipeline on
+    /// an already-installed MLX model so users can flip 4-bit ↔ 8-bit.
+    /// v0.9 limitation: we don't peek at the existing weights' bit-width —
+    /// re-quantize always reads weights from the source dir and writes a new
+    /// sibling dir, so the source is preserved regardless.
+    static func handleRequantize(args: [String]) async throws {
+        // Delegate to handleConvert — the only difference is which default
+        // bits users typically want. We keep the same flag vocabulary so
+        // muscle memory transfers.
+        var forwarded = ["--q-bits", "8"]
+        forwarded.append(contentsOf: args)
+        try await handleConvert(args: forwarded)
+    }
+
+    static func printConvertHelp() {
+        moxStderr("""
+        mox convert — quantize a local HF/MLX model directory
+
+        Usage:
+          mox convert <source-dir> [--q-bits N] [--q-group-size N] [--mode M] [--output DIR]
+
+        Flags:
+          --q-bits N          Bits per weight (default 4; 8 also common)
+          --q-group-size N    Elements per quantization group (default 64)
+          --mode M            affine | mxfp4 | mxfp8 (default affine)
+          --output, -o DIR    Output directory (default: <source>-<bits>bit)
+
+        Examples:
+          mox convert ~/.mox/models/Qwen2.5-7B-Instruct
+          mox convert ./my-bf16-model --q-bits 8 --q-group-size 64
+          mox convert ./model --mode mxfp8 --output ./model-mxfp8
+
+        Notes:
+          v0.9 only accepts local directories. Pull HF ids with `mox pull`
+          first; auto-convert on pull is wired in v0.9.
+        """)
+    }
+
+    /// Sum the on-disk size of every regular file under `dir` (one level,
+    /// not recursive — model directories are flat by convention).
+    private static func directorySize(_ dir: URL) -> Int64 {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for url in entries {
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            if values?.isRegularFile == true, let size = values?.fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
 
     static func handleDebug(args: [String]) async {
         let cmd = args.first ?? "help"

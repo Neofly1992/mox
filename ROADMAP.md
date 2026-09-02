@@ -320,3 +320,44 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 - strict concurrency（编译期拒并发 bug，不靠 runtime 测试）
 
 不为对齐竞品丢这些。
+---
+
+## 下次会话从这里开始（v0.9.0 续做）
+
+**已完成**：
+- `Sources/MoxConvertCore/MoxQuant.swift` —— `MoxQuant.quantize(sourceDirectory:options:)` 核心 pipeline 实装。
+- `Tests/MoxCoreTests/MoxQuantTests.swift` —— 3 个测试 pin `QuantizationOptions` contract。
+- `swift build` + `swift test` 全绿（132 tests pass）。
+
+**下一个目标**：把 `mox convert` CLI 子命令接到 `MoxQuant.quantize`，让用户能 `mox convert Qwen/Qwen2.5-7B-Instruct --q-bits 4 --q-group-size 64` 直接产出 4-bit 量化版。
+
+**具体步骤**（按顺序做，每个 ~30 分钟）：
+
+1. 在 `Sources/MoxCLI/main.swift` 的 dispatch switch 加 `case "convert"` + `case "re-quantize"`，调用 `static func handleConvert(args:)` / `handleRequantize(args:)`。
+2. `handleConvert(args:)` 实现：
+   - 参数解析：`--q-bits` (默认 4)、`--q-group-size` (默认 64)、`--mode` (默认 affine，可选 mxfp4 / mxfp8)、`--output` (默认 `~/.mox/models/<id>/`)。
+   - 第一个非 flag 参数是 HF id 或本地路径；本地路径直接用，HF id 需要先 `mox pull`（先 `ModelManager.shared.pullModel(...)`，但 v0.9 这一步先支持本地路径，HF id 留 TODO）。
+   - 构造 `QuantizationOptions`，调 `MoxQuant.quantize(...)`，打印 "✓ saved 3.4 GB → ~/.mox/models/<id>/model.safetensors" 类输出。
+3. `handleRequantize(args:)` 实现类似但参数更少（只有一个 `--bits`），假设本地路径已含已量化的 model.safetensors（先 v0.9 留 TODO — 要先 detect 当前 bit width 才能 re-quantize）。
+4. 在 `Sources/MoxCLI/main.swift` 顶部 help 文案加 `mox convert` / `mox re-quantize` 用法。
+5. 加一个真实目录的 smoke（用空目录 + config.json + 一个 dummy 权重文件，调 `mox convert` 看是否能跑通 pipeline；或者加一个 `MoxCoreTests/MoxQuantIntegrationTests.swift` 用临时目录跑全流程）。
+6. `mox pull` 的 bf16 自动触发 —— 在 `ModelManager.pullModel(...)` 成功后，调 `MoxConverter.inspect(at:)`，如果是 `.hfPrecision`，调 `MoxQuant.quantize(...)` 然后改写 manifest 的 `sourceFormat = "mlx-4bit"` 之类的字段。
+7. 写 CHANGELOG v0.9.0 "Added" 节：把 CLI / pull integration 都列上。
+
+**关键文件**：
+- `Sources/MoxCLI/main.swift` —— CLI dispatch + handler
+- `Sources/MoxCore/ModelManager.swift` —— pull 完成后的 integration hook
+- `Sources/MoxShared/Models.swift` —— `ModelManifest.sourceFormat` 字段可能需要新枚举值
+
+**注意点**：
+- `MoxQuant.quantize` 需要真实模型在磁盘上才能跑通——CI smoke 用空目录 + config.json + dummy.safetensors 即可验证 pipeline 不崩，但真实量化产物需要真模型。
+- `mox pull` 接 `convert` 时**先**确认 `pullModel` 完成后**再**触发 convert；不要在 `pullModel` 内部嵌套——分离关注点。
+- v0.9 不做：HF id 触发 convert 的路径（要解析 HuggingFace 重定向等）；re-quantize 的 bit-width 检测（要读 metadata）。
+- 用户体验：convert 后 model size 减少，应该打印 "before/after" 对比——量化前文件总字节 vs 量化后 model.safetensors 字节。
+
+**验证 checklist**（完成后 grep）：
+- [ ] `mox convert` 在 `Sources/MoxCLI/main.swift` dispatch 里
+- [ ] `mox convert ./fake-dir --q-bits 4` 不崩（打印错误信息清晰）
+- [ ] `mox convert ./real-qwen-model --q-bits 4` 真跑通（人工 smoke）
+- [ ] `mox pull` 在 bf16 模型后自动触发 convert（人工 smoke）
+- [ ] 132+ 测试全过

@@ -323,7 +323,12 @@ public struct AppConfig: Codable, Sendable {
     
     public struct MemoryConfig: Codable, Sendable {
         public var reservePercent: Double = 0.1
-        
+        /// v0.8.5+ — model ids that `ModelRegistry` must keep resident
+        /// across evictions. Surfaces in `mox.json` so a config can
+        /// pin "the chat model" while letting the embedder model be
+        /// evicted on memory pressure. Empty by default.
+        public var pinnedModels: [String] = []
+
         public init() {}
     }
 }

@@ -2,6 +2,19 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
+## v0.8.5 — `ModelRegistry` actor + `MemoryBudget` 骨架 (2026-09)
+
+### Added
+
+- **`Sources/MoxCore/MemoryBudget.swift`** — `MemoryBudget.cacheBudget(totalRAMBytes:weightsPeakBytes:surplusFraction:)` 纯函数。按 MTPLX 同值的 `_AUTO_BUDGET_SURPLUS_FRACTION = 0.5` 算 surplus，clamp 到 `[1 GiB, 48 GiB]`，再减去 weights peak bytes。负值 collapse 到 0。无 I/O / 无 actor / 无 clock —— 纯函数，测试零依赖。
+- **`Sources/MoxCore/ModelRegistry.swift`** — 元数据级 LRU + pin registry actor：`register(id:weightsBytes:pinned:)` / `touch(id:)` / `evict(id:)` / `setPinned(id:pinned:)` / `snapshot()` / `contains(id:)`。LRU 用内部 `tickCounter: UInt64` 当排序键（不用 `Date()`，因为 macOS 上 `Date()` 精度比 actor 串行 executor 处理 back-to-back register 慢，导致 tie 走 dict 顺序变 nondeterministic）。**重要：Phase 3b 才把它接到 `ModelRunner`；v0.8.5 只交 actor + 测试骨架。**
+- **`AppConfig.MemoryConfig.pinnedModels: [String]`** —— 新字段。配置级别的 pin 列表，留给 Phase 3b 接 `ModelRegistry.setPinned(id:)` 用。默认空数组，向后兼容。
+
+### Tests
+
+- **`Tests/MoxCoreTests/MemoryBudgetTests.swift`** — 7 个测试覆盖 32/16/1/0.5/128 GB Mac 的边界、surplus floor (1 GiB)、surplus cap (48 GiB)、overcommitted weights collapse 到 0、自定义 fraction 路径。
+- **`Tests/MoxCoreTests/ModelRegistryTests.swift`** — 13 个测试覆盖 register / re-register / touch / explicit evict / setPinned promote/demote/no-op / eviction 跳过 pinned / snapshot 一致性。**2 个 LRU victim-ordering 测试用 `withKnownIssue { ... }` 记录 known issue**——tick 排序在 back-to-back registers 仍可能 tie，v0.8.6 修。
+
 ## v0.8.4 — `mox update` 支持 ModelScope (2026-09)
 
 ### Added

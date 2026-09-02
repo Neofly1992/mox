@@ -113,7 +113,7 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 **不做**：构建一份"内部 verified model 列表"——那是 MTPLX 闭源商业化前提下的产物，mox 是 MIT 工具，不替用户验证。
 
-### 8.3 多 model 实例 + 内存预算 — 推迟至 v0.9
+### 8.3 多 model 实例 + 内存预算 — 部分交付（v0.8.5 actor + MemoryBudget；v0.8.6 接 ModelRunner + /health）
 
 **动机**：用户真实场景 = 聊天 + RAG embedding 并发；agent 同时调两个不同家族的模型做 ensemble。当前 mox 一个进程只能 hold 一个 model，重启即切换。
 

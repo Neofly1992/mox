@@ -250,6 +250,9 @@ public struct ModelManifest: Codable, Sendable {
     /// written. Re-probed at load time; mismatch is reported, not
     /// silently overridden.
     public var compatibility: ModelCompatibility?
+    /// v0.8.3+ — upstream revision pin last observed by `mox update`.
+    /// nil for legacy installs that pre-date update-tracking.
+    public var revision: String?
 
     public init(
         id: String,
@@ -258,7 +261,8 @@ public struct ModelManifest: Codable, Sendable {
         installedAt: Date = Date(),
         sourceFormat: String? = nil,
         quantization: MoxQuantizationInfo? = nil,
-        compatibility: ModelCompatibility? = nil
+        compatibility: ModelCompatibility? = nil,
+        revision: String? = nil
     ) {
         self.id = id
         self.source = source
@@ -267,6 +271,7 @@ public struct ModelManifest: Codable, Sendable {
         self.sourceFormat = sourceFormat
         self.quantization = quantization
         self.compatibility = compatibility
+        self.revision = revision
     }
 }
 

@@ -2,6 +2,21 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
+## v0.8.3 — `mox update` 闭环（2026-09）
+
+### Fixed
+
+- **`mox update` 改 sha256.txt**：之前 update 后 `sha256.txt` 不重算，下次 `mox list --check` / 再 diff 会把刚下载的文件当 unchanged 直接跳过。v0.8.3 每次 download 完都重新 hash 全目录的权重文件并写回 `sha256.txt`（`mox.json` / `sha256.txt` 自身跳过，避免鸡生蛋）。
+- **`mox update` pin revision**：`ModelManifest.revision: String?` 新字段；`ModelUpdater.update` 把远端 inventory 报的 revision pin 写回 `mox.json`。远端 `nil` 时保留已有 pin（避免把历史 pin 抹掉）。legacy install `revision` 默认 `nil`，向后兼容。
+
+### Improved
+
+- **`mox update` 多文件进度聚合**：之前每个文件进度独立 0..100%，多文件时看起来永远卡在第一个文件。`UpdateProgressTracker`（NSLock-protected）累计字节到 `plan.totalBytesToFetch`；CLI 端不再需要改 — `DownloadProgress.bytesDownloaded` 已经是累计值。
+
+### Tests
+
+- **`Tests/MoxCoreTests/ModelUpdaterTests.swift`**：4 个测试用 in-memory `StubFetcher` / `StubDownloader` 覆盖 sha256 重算、revision pin、nil-revision 保留、多文件进度聚合。无网络依赖，CI 友好。
+
 ## v0.9.0 — `mox convert` + `mox re-quantize` + pull auto-quantize (2026-09)
 
 ### Added (shipped)

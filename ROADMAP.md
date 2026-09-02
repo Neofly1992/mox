@@ -131,7 +131,7 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 **不做**：模型预热优先级 / 排队策略（v0.9+ 再说）；SSD spillover（v0.9）。
 
-### 8.4 增量下载 ✅ (diff 引擎 + `mox list --check` 完成；`mox update` 实际下载推迟至 v0.9)
+### 8.4 增量下载 ✅ ✅ v0.8.3 全闭环
 
 **动机**：MTPLX 2.9.0 的核心卖点之一——`mtplx models --check` + `--update`：重新下载 240-450 MB 而不是 15-21 GB。`mox.json` manifest 已经写了 SHA-256 + revision pin，**只差一步：HTTP HEAD + diff**。
 

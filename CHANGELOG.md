@@ -241,3 +241,53 @@ Total: 109 tests, up from 76 in v0.7.
 
 - `ROADMAP.md` — full v0.7 → v1.0 plan; v0.8 items above are checked off,
   v0.9 onwards is next.
+
+## v0.7.0 — 协议补齐 + 契约外露 (2026-08)
+
+### Added
+
+- **OpenAI `/v1/chat/completions` SSE 流**: 把现有 Anthropic SSE handler 镜像成 OpenAI 协议（`data: {"object":"chat.completion.chunk",...}\n\n` + `data: [DONE]\n\n`）。`finish_reason` 仅在末条发；`stream_options.include_usage` 时附 usage chunk。
+- **`/v1/completions` (legacy)**: 拍平 `messages[]` 为单字符串按 chat template 构造 prompt；复用 OpenAI SSE 流。
+- **`/health` 能力面** (`HealthPayload`): 暴露 `isReady` / `loadedModelId` / `loadedModelFamily` / `supportsToolCalls` / `maxContextTokens` / `samplerDefaults` / `streamChunkIntervalMs`。`moxVersion` 字段版本化便于客户端判版本。
+- **启动 warmup + `/health` 联动**: `ModelRunner` actor 加载后跑 8-16 token `Hello` 生成；成功才把 `isReady` 翻 true。失败时 daemon 进程退出非 0 + `mox-server status` 返回明确错误码。
+- **`RequestPolicy` 共享解析路径** (`MoxShared.RequestPolicy`): `ResolvedRequest` 值类型 + `RequestPolicy.resolve(_:serverConfig:) throws`。OpenAI / Anthropic / Completions handler 都先调它。错误优先级明确：空 prompt → 不支持模型 → tool call 未实现 → sampler 非有限数 → 其余约束。
+
+### Source layout (v0.7)
+
+- `Sources/MoxShared/RequestPolicy.swift` — shared resolution
+- `Sources/MoxServer/Server.swift` — OpenAI SSE + Anthropic handler wired through policy
+
+76 tests passing (v0.7 baseline).
+
+## v0.6.0 — NIO server + 下载安全 + MLX 集成 (2026-08)
+
+### Added
+
+- **Swift NIO server** (`Sources/MoxServer`): `HTTPRouter` 路由表 + `Server.swift` 启动 NIO event loop，bind host:port，serving `/health`、`/v1/chat/completions`、`/v1/messages`、`/v1/completions`、`/v1/embeddings`。
+- **`Downloader` 协议** + `URLSessionDownloader` 实现：探针 + Content-Length + ETag + Last-Modified 头部读取，原子写到 `~/.mox/models/<id>/`。Range resume 框架。
+- **`ModelPathGuard`**: 防 path traversal —— 拒绝空名、绝对路径、含 `/` `\`, 含 `..` 的文件名。
+- **`MemoryGuard`**: `host_statistics64` + `vm_statistics64` 读 available memory；`canLoadModel(sizeBytes:)`、`checkAndNotify(sizeBytes:)` 在加载前守门。
+- **MLX 集成**: `MLXLMCommon.loadModelContainer(from:using:)` 装载 HF 模型目录，`container.perform { context in ... }` 跨 actor 边界驱动 generation；`MLX.save(arrays:url:stream:)` 写 safetensors。
+- **`ModelManager` actor**: 串行化 `~/.mox/models/` 目录的 read/write/download。`pullModel(id:source:progressHandler:)`、`listModels()`、`deleteModel(id:)`、`modelInfo(for:)`、`modelPath(for:)`。
+- **临时目录下载 + 验证后移动**: pull 时先写到 `.tmp-<uuid>/`，hash 全部文件，验证路径安全，再 `moveItem` 到 `destinationDir` + 写 `sha256.txt`。失败回退删除 `destinationDir`。
+- **CLI**: `mox pull / list / run / delete / chat / ask / help` 基础 dispatch + `mox-server launchd` 集成。
+
+## v0.5.0 — 早期 actor化 + REPL chat + GUI bootstrap (2026-08)
+
+### Added
+
+- **actor 化 Convert managers**: 之前 RC + manual locks 改为 Swift actor 模型；编译期并发安全。
+- **REPL chat** (`mox chat <model>`): 交互式聊天模式，读取 stdin 行作为 user message，streaming 输出 assistant token。
+- **`mox delete`** 命令：删除本地模型目录。
+- **CLI developer utilities** (mox debug db/models/daemon/open-data-dir, 后期 v0.7)。
+- **v0.3 GUI bootstrap** (`Sources/MoxGUI`): `MoxApp` SwiftUI 入口 + `AppState` 状态机 + `DaemonModeDialog` + `Settings` tab + Process spawn 链路。设计文档 `MoxGUI.md`。
+- **`mox.json` manifest schema**: 首次引入 `id` / `source` / `originalId` / `installedAt` / `sourceFormat` / `quantization` 字段。pull 时写入；`listModels` 读 manifest 决定 source（不再靠目录名 reverse-engineer）。
+- **`MoxConverter.inspect(at:)`** (v0.5 shipping intent; finalised in v0.9): 读 `config.json` 的 `model_type` / `torch_dtype` / `quantization_config` 分类 `.mlxQuantized` / `.hfPrecision(dtype:)` / `.unknown(reason:)`。v0.5 时 pull 后路由决策使用。
+- **`MemoryBudget` / `MemoryGuard` 骨架**: `MemoryGuard` 单点探针；`MemoryBudget` 留在 v0.8.5 落地。
+
+### Source layout (v0.5)
+
+- 新建 `Sources/MoxConvertCore/` —— 包含 v0.9 会扩展的 MoxConvert + MoxQuant skeleton
+- `Sources/MoxGUI/` —— SwiftUI 客户端
+- `Sources/MoxGUIClient/` —— SwiftUI ↔ daemon IPC 协议
+

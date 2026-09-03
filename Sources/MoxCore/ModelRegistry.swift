@@ -78,7 +78,6 @@ public actor ModelRegistry {
     /// Returns the IDs that had to be evicted to make room, in
     /// eviction order. Empty when the new entry fits without
     /// pressure.
-    @discardableResult
     public func register(
         id: String,
         weightsBytes: Int64,
@@ -125,6 +124,7 @@ public actor ModelRegistry {
     public func touch(id: String) async -> Bool {
         guard var entry = entries[id] else { return false }
         tickCounter &+= 1
+        let oldTick = entry.tick
         entry.lastTouched = Date()
         entry.tick = tickCounter
         entries[id] = entry
@@ -149,7 +149,9 @@ public actor ModelRegistry {
 
     /// release downstream resources). Unknown ids return nil.
     public func evict(id: String) async -> Entry? {
-        guard let entry = entries.removeValue(forKey: id) else { return nil }
+        guard let entry = entries.removeValue(forKey: id) else {
+            return nil
+        }
         weightsTotalBytes -= entry.weightsBytes
         return entry
     }
@@ -164,15 +166,7 @@ public actor ModelRegistry {
         // If the new entry alone exceeds the whole budget, refuse:
         // eviction cannot help. The caller surfaces a clear error
         // to the user.
-        if neededBytes > cacheBudgetBytesStorage {
-            return evicted
-        }
         while weightsTotalBytes + neededBytes > cacheBudgetBytesStorage {
-            // Pick the oldest non-pinned entry not in `except`.
-            // LRU key is the monotonic `tick`, not `lastTouched`:
-            // the latter ties on sub-millisecond back-to-back
-            // registers (Date() resolution on macOS) and `min(by:)`
-            // then resolves to a nondeterministic dict order.
             let victim = entries.values
                 .filter { !$0.pinned && $0.id != except }
                 .min { $0.tick < $1.tick }

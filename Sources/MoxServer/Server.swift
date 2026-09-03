@@ -277,7 +277,7 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
         }
     }
 
-     private func handleHealth(channel: Channel) {
+    private func handleHealth(channel: Channel) {
         let host = self.host
         let port = self.port
         Task {
@@ -297,6 +297,11 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
                         compatibilityReason: rec.compatibilityReason
                     )
                 }
+                // v0.8.6+ — pull the registry's view of the resident
+                // set so /health shows the budget the LRU policy
+                // is enforcing. nil when no model has been loaded
+                // yet on this runner.
+                let registrySnap = await ModelRunner.shared.registrySnapshot()
                 let payload = HealthPayload(
                     status: "ok",
                     moxVersion: moxHealthPayloadVersion,
@@ -311,7 +316,10 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
                     runtime: HealthPayload.Runtime(
                         host: host,
                         port: port,
-                        maxBodyBytes: 16 * 1024 * 1024
+                        maxBodyBytes: 16 * 1024 * 1024,
+                        cacheBudgetBytes: registrySnap?.cacheBudgetBytes,
+                        cacheUsedBytes: registrySnap?.cacheUsedBytes,
+                        loadedModelCount: registrySnap?.entries.count ?? loaded.count
                     )
                 )
                 channel.eventLoop.execute {
@@ -321,8 +329,8 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
                 channel.eventLoop.execute {
                     self.respondError(on: channel, error: error)
                 }
+            }
         }
-    }
     }
 
 

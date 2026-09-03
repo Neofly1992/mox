@@ -60,5 +60,34 @@ struct HealthPayloadTests {
         #expect(HealthPayload.Capabilities.v07.toolCalls)
         #expect(!HealthPayload.Capabilities.v07.embeddings)
     }
+    func runtimeCacheFields() throws {
+        // Defaults: nil budget, nil used, zero count — keeps wire
+        // shape compatible with pre-v0.8.6 callers that don't
+        // expect these keys.
+        let cold = HealthPayload.Runtime(host: "h", port: 1, maxBodyBytes: 16)
+        #expect(cold.cacheBudgetBytes == nil)
+        #expect(cold.cacheUsedBytes == nil)
+        #expect(cold.loadedModelCount == 0)
 
+        // Round-trip with values populated: the snake_case keys
+        // must come out the other side intact.
+        let warm = HealthPayload.Runtime(
+            host: "h", port: 1, maxBodyBytes: 16,
+            cacheBudgetBytes: 16 * 1024 * 1024 * 1024,
+            cacheUsedBytes: 8 * 1024 * 1024 * 1024,
+            loadedModelCount: 2
+        )
+        let data = try JSONEncoder().encode(warm)
+        let json = String(data: data, encoding: .utf8) ?? ""
+        #expect(json.contains("\"cache_budget_bytes\":\(16 * 1024 * 1024 * 1024)"))
+        #expect(json.contains("\"cache_used_bytes\":\(8 * 1024 * 1024 * 1024)"))
+        #expect(json.contains("\"loaded_model_count\":2"))
+        let decoded = try JSONDecoder().decode(HealthPayload.Runtime.self, from: data)
+        #expect(decoded == warm)
+    }
+
+    @Test("moxHealthPayloadVersion bumped to 0.8.6")
+    func payloadVersion() {
+        #expect(moxHealthPayloadVersion == "0.8.6")
+    }
 }

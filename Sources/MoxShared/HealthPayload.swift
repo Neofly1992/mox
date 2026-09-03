@@ -18,7 +18,7 @@ public struct SamplerDefaults: Sendable, Codable, Equatable {
 /// `{"status":"ok"}` of v0.6 so coding-agent clients can introspect the
 /// runtime without round-tripping `/v1/models`. Fields are versioned by
 /// `moxVersion` so older clients can ignore new keys safely.
-public let moxHealthPayloadVersion = "0.8.0"
+public let moxHealthPayloadVersion = "0.8.6"
 
 public struct HealthPayload: Codable, Sendable, Equatable {
     public let status: String
@@ -157,17 +157,42 @@ public struct HealthPayload: Codable, Sendable, Equatable {
         public let host: String
         public let port: Int
         public let maxBodyBytes: Int
+        /// v0.8.6+ — cache budget (bytes) that `ModelRegistry` enforces
+        /// for resident model weights. nil when the runner hasn't
+        /// initialised its registry yet (cold start, before any
+        /// model loaded).
+        public let cacheBudgetBytes: Int64?
+        /// v0.8.6+ — cache headroom remaining (bytes) within
+        /// `cacheBudgetBytes`. Nil alongside `cacheBudgetBytes`.
+        public let cacheUsedBytes: Int64?
+        /// v0.8.6+ — number of models currently resident in the
+        /// runner (across all sources — huggingface, mlx-community,
+        /// modelscope, etc).
+        public let loadedModelCount: Int
 
         enum CodingKeys: String, CodingKey {
             case host
             case port
             case maxBodyBytes = "max_body_bytes"
+            case cacheBudgetBytes = "cache_budget_bytes"
+            case cacheUsedBytes = "cache_used_bytes"
+            case loadedModelCount = "loaded_model_count"
         }
 
-        public init(host: String, port: Int, maxBodyBytes: Int) {
+        public init(
+            host: String,
+            port: Int,
+            maxBodyBytes: Int,
+            cacheBudgetBytes: Int64? = nil,
+            cacheUsedBytes: Int64? = nil,
+            loadedModelCount: Int = 0
+        ) {
             self.host = host
             self.port = port
             self.maxBodyBytes = maxBodyBytes
+            self.cacheBudgetBytes = cacheBudgetBytes
+            self.cacheUsedBytes = cacheUsedBytes
+            self.loadedModelCount = loadedModelCount
         }
     }
 }

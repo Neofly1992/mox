@@ -2,7 +2,23 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
-## v0.8.5 — `ModelRegistry` actor + `MemoryBudget` 骨架 (2026-09)
+## v0.8.6 — `ModelRunner` 接 `ModelRegistry` (2026-09)
+
+### Added
+
+- **`ModelRunner.loadModel`** 现在通过 `ModelRegistry` 跟踪 resident 模型：构造预算（按 `MemoryBudget.cacheBudget(totalRAM, weightsPeak: 0)` + 首次 load 时的实测 total RAM），register 每个 id，evicted ids 同步释放对应 `ModelContainer`。pinned 配置从 `AppConfig.memory.pinnedModels` 读取。
+- **`ModelRunner.container(for:)`** 服务请求后调 `registry.touch(id:)` —— LRU 反映"刚服务请求"的模型优先保留。
+- **`ModelRunner.unloadModel` / `unloadAll`** 同步从 registry evict 释放 bytes。
+- **`ModelRunner.registrySnapshot()`** —— `/health` 拿 budget / used / loadedCount 的源头。
+- **`HealthPayload.Runtime`** 新字段：`cacheBudgetBytes: Int64?` / `cacheUsedBytes: Int64?` / `loadedModelCount: Int`（snake_case：`cache_budget_bytes` / `cache_used_bytes` / `loaded_model_count`）。默认值 nil/0，向后兼容 pre-v0.8.6 caller。
+- **`moxHealthPayloadVersion`** 从 `0.8.0` bump 到 `0.8.6`。
+
+### Tests
+
+- **`HealthPayloadTests.runtimeCacheFields`** —— round-trip 新字段 + 默认值 nil 兼容；断言 snake_case 编码。
+- **`HealthPayloadTests.payloadVersion`** —— pin version bump。
+
+## v0.8.5 — `ModelRegistry` actor + `MemoryBudget` 骨架
 
 ### Added
 

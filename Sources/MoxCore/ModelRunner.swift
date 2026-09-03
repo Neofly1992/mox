@@ -14,6 +14,19 @@ public actor ModelRunner {
 
     private var loadedModels: [String: Entry] = [:]
     private let memoryGuard = MemoryGuard.shared
+    /// v0.8.6+ — budget-aware LRU + pin registry. Lazy: only
+    /// materialised when the first model is loaded (cold start
+    /// avoids the sysctl cost of probing total RAM up front).
+    /// `nil` means "registry hasn't been built yet"; once any
+    /// model is loaded the registry sticks around for the actor's
+    /// lifetime.
+    private var registry: ModelRegistry?
+    /// Bytes-per-token approximation used by the registry when
+    /// the caller doesn't supply a per-model weight size. Real
+    /// weight bytes come from `ModelInfo.size` on `pullModel`; the
+    /// fallback is conservative (over-counts) so a model never
+    /// lands in the registry without enough budget reserved.
+    private static let fallbackWeightsBytes: Int64 = 4 << 30 // 4 GiB
 
     public init() {}
 
@@ -23,10 +36,11 @@ public actor ModelRunner {
         loadedModels.removeAll()
     }
 
-    // MARK: - Public API
-
     public func loadModel(id: String, config: AppConfig? = nil) async throws -> LoadedModel {
         if let entry = loadedModels[id] {
+            // Re-registration refreshes `lastTouched` so the LRU
+            // policy keeps this entry alive across pressure.
+            await registry?.touch(id: id)
             return entry.record
         }
 
@@ -45,6 +59,28 @@ public actor ModelRunner {
         let modelPath = URL(fileURLWithPath: modelInfo.path)
         try Self.requireModelDirectory(at: modelPath)
 
+        // Tell the registry about this load BEFORE we touch the
+        // container. If the entry is too big to ever fit, we
+        // refuse before doing the expensive load. If it fits but
+        // requires evicting siblings, the returned list tells us
+        // which `ModelContainer`s to release on this actor.
+        let registry = ensureRegistry()
+        let weightsBytes = modelInfo.size > 0
+            ? modelInfo.size
+            : Self.fallbackWeightsBytes
+        let pinned = config?.memory.pinnedModels.contains(id) ?? false
+        let evictedIds = await registry.register(
+            id: id,
+            weightsBytes: weightsBytes,
+            pinned: pinned
+        )
+        for evictedId in evictedIds {
+            // LRU sweep kicked someone out. Release its container
+            // on this actor (ModelContainer has no explicit close
+            // but clearing the map lets ARC reclaim).
+            loadedModels.removeValue(forKey: evictedId)
+        }
+
         let container = try await loadModelContainer(from: modelPath, using: #huggingFaceTokenizerLoader())
         let manifest = (try? await ModelManager.shared.readManifest(at: modelPath))
         let persistedTier = manifest?.compatibility?.tier
@@ -62,6 +98,10 @@ public actor ModelRunner {
         )
         if verdict == .incompatible {
             moxLog.error("model \(id, privacy: .public) load rejected: fresh probe incompatible")
+            // Undo the registry registration since we're not
+            // actually bringing the model up. Tolerant: the actor
+            // is going down on the next line anyway.
+            _ = await registry.evict(id: id)
             throw ModelError.unsupportedArchitecture(
                 freshCompatibility?.reason ?? "compatibility probe rejected"
             )
@@ -85,13 +125,41 @@ public actor ModelRunner {
         loadedModels[id] = Entry(container: container, record: record)
         return record
     }
+
+    /// Materialise the registry lazily on the first model load.
+    /// Reads total RAM once, computes the cache budget via
+    /// `MemoryBudget.cacheBudget`, and parks it in `self.registry`.
+    private func ensureRegistry() -> ModelRegistry {
+        if let registry { return registry }
+        let totalRAM = memoryGuard.getMemoryStatus().totalMemory
+        // budget = clamp(totalRAM * 0.5, 1 GiB, 48 GiB) at zero
+        // resident weights — we'll subtract as models load.
+        let budget = MemoryBudget.cacheBudget(
+            totalRAMBytes: Int64(totalRAM),
+            weightsPeakBytes: 0
+        )
+        let new = ModelRegistry(cacheBudgetBytes: budget)
+        self.registry = new
+        return new
+    }
+
     public func unloadModel(id: String) {
         loadedModels.removeValue(forKey: id)
+        // Mirror the eviction on the registry so the cache budget
+        // gets the bytes back. Tolerant: registry may not exist
+        // if the runner was never asked to load anything.
+        let registry = self.registry
+        Task { await registry?.evict(id: id) }
     }
 
 
     public func unloadAll() {
+        let ids = Array(loadedModels.keys)
         loadedModels.removeAll()
+        let registry = self.registry
+        Task {
+            for id in ids { await registry?.evict(id: id) }
+        }
     }
 
     public func isModelLoaded(id: String) -> Bool {
@@ -100,6 +168,14 @@ public actor ModelRunner {
 
     public func listLoadedModels() -> [String] {
         Array(loadedModels.keys)
+    }
+
+    /// Forward to `ModelRegistry.snapshot()` for `/health` reporting.
+    /// `nil` when the registry hasn't been built yet (no model has
+    /// ever been loaded on this runner).
+    public func registrySnapshot() async -> ModelRegistry.Snapshot? {
+        guard let registry else { return nil }
+        return await registry.snapshot()
     }
 
     /// Returns the model-family hint for a previously loaded model.
@@ -277,8 +353,14 @@ public actor ModelRunner {
 
     private func container(for modelId: String) async throws -> ModelContainer {
         if let entry = loadedModels[modelId] {
+            // LRU refresh — a model that just served a request
+            // should be the last to be evicted.
+            await registry?.touch(id: modelId)
             return entry.container
         }
+        // Cold path: load and pick up the entry that loadModel just
+        // installed. `loadModel` registers on the registry, so the
+        // second lookup is guaranteed to find it.
         _ = try await loadModel(id: modelId)
         guard let entry = loadedModels[modelId] else {
             throw ModelError.notFound(modelId)

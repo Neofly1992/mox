@@ -71,8 +71,7 @@ private struct ModelsTab: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Models").font(.title)
             if appState.models.isEmpty {
-                Text("No models installed yet. Run `mox pull <id>` from the CLI for now.")
-                    .foregroundStyle(.secondary)
+                HardwareSuggestionBanner()
             } else {
                 List(appState.models, id: \.id) { model in
                     HStack {
@@ -184,6 +183,50 @@ private struct LogsTab: View {
             Text("WIP — log filter + tail view of `~/Library/Logs/Mox/` arrive next milestone.")
                 .foregroundStyle(.secondary)
             Spacer()
+        }
+    }
+}
+
+/// v0.10.1 — empty-state banner shown in the Models tab when no
+/// model is installed yet. Surfaces a hardware-aware recommendation
+/// from `HardwareSuggestion` so the user gets a concrete next step
+/// (`mox pull <id>`) instead of staring at "No models installed."
+/// On Intel Macs we show the short-circuit note (no MLX) instead of
+/// a recommendation.
+private struct HardwareSuggestionBanner: View {
+    @State private var suggestion: HardwareSuggestion?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let s = suggestion {
+                HStack {
+                    Image(systemName: s.isAppleSilicon ? "cpu" : "exclamationmark.triangle")
+                    Text("Detected: \(s.brand), \(s.totalRAMGB) GB RAM (\(s.tier.rawValue) tier)")
+                        .font(.headline)
+                }
+                if let installed = s.alreadyInstalled {
+                    Text("Recommended: \(installed) (already installed)")
+                        .foregroundStyle(.secondary)
+                } else if !s.isAppleSilicon {
+                    Text(s.notes)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Recommended:").font(.subheadline)
+                    ForEach(s.recommendedIDs, id: \.self) { id in
+                        Text("  • \(id)").foregroundStyle(.secondary)
+                    }
+                    Text("Run `mox pull <id>` then `mox run <id>`")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Probing hardware…").foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(Color.secondary.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .task {
+            suggestion = HardwareSuggestion.current()
         }
     }
 }

@@ -89,3 +89,41 @@ public enum MoxGUIConfig {
         return "/opt/homebrew/bin/mox-server"
     }
 }
+
+/// v0.10.1 — wraps `HardwareClassifier` + `DefaultModelSuggester` in a
+/// single GUI-friendly call. The SwiftUI side calls `current()` and
+/// gets back a fully-formed suggestion (hardware detected + tier +
+/// ordered recommendations), or a one-liner explanation if the
+/// environment is unrecognisable.
+///
+/// Lives in `MoxGUIClient` (not in the SwiftUI views) so it can be
+/// unit-tested without spinning up the GUI host and so the CLI's
+/// `handleSuggest` can use the same wrapper if it wants to.
+public struct HardwareSuggestion: Sendable, Equatable {
+    public let brand: String
+    public let totalRAMGB: Int
+    public let tier: DefaultModelSuggester.Suggestion.Tier
+    public let recommendedIDs: [String]
+    /// First id from `recommendedIDs` that the caller reports as
+    /// already installed. `nil` when nothing matches.
+    public let alreadyInstalled: String?
+    public let isAppleSilicon: Bool
+    public let notes: String
+
+    public static func current(
+        installedModelIDs: [String] = []
+    ) -> HardwareSuggestion {
+        let hardware = HardwareClassifier()
+        let suggestion = DefaultModelSuggester().suggest(for: hardware)
+        let installed = installedModelIDs.first(where: suggestion.recommendedIDs.contains)
+        return HardwareSuggestion(
+            brand: hardware.brandString.isEmpty ? "unknown Mac" : hardware.brandString,
+            totalRAMGB: suggestion.totalRAMGB,
+            tier: suggestion.tier,
+            recommendedIDs: suggestion.recommendedIDs,
+            alreadyInstalled: installed,
+            isAppleSilicon: hardware.isAppleSilicon,
+            notes: suggestion.notes
+        )
+    }
+}

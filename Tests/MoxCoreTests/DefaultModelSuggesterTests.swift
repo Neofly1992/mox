@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import MoxCore
+@testable import MoxShared
 
 /// `DefaultModelSuggester.suggest` is a pure function over `HardwareClassifier`.
 /// We exercise every tier boundary from §9.4 + the Intel-fallback + the

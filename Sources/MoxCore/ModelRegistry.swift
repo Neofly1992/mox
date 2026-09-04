@@ -121,6 +121,97 @@ public actor ModelRegistry {
         return eviction
     }
 
+    /// v0.10.1 — deterministic batch register. Performs N registers
+    /// in a single actor continuation so the strict LRU victim
+    /// order is reproducible across runs. Use this in tests where
+    /// the caller wants to assert *which* entry was evicted; for
+    /// production traffic, prefer `register` (it interleaves
+    /// naturally with the scheduler and that's fine — the LRU
+    /// policy itself is unchanged).
+    ///
+    /// Returns the eviction list from the **last** call, mirroring
+    /// what `register` would have returned if N registers were
+    /// issued back-to-back. The earlier evictions are observable
+    /// through the post-state of the registry.
+    public func registerBatch(
+        _ registrations: [(id: String, weightsBytes: Int64, pinned: Bool)]
+    ) -> [String] {
+        var lastEviction: [String] = []
+        for reg in registrations {
+            lastEviction = registerSync(
+                id: reg.id,
+                weightsBytes: reg.weightsBytes,
+                pinned: reg.pinned
+            )
+        }
+        return lastEviction
+    }
+
+    /// Sync register — same policy as `register`, but without the
+    /// `await` boundary so it can be called repeatedly from inside
+    /// a single actor continuation (`registerBatch`).
+    ///
+    /// Not public: production callers should use `register` so the
+    /// scheduler can interleave. `registerSync` is `internal` to
+    /// MoxCore so the test target can drive it directly via
+    /// `@testable import MoxCore` (see `ModelRegistryTests`).
+    func registerSync(
+        id: String,
+        weightsBytes: Int64,
+        pinned: Bool = false
+    ) -> [String] {
+        precondition(weightsBytes >= 0, "weightsBytes must be non-negative")
+        if weightsBytes > cacheBudgetBytesStorage, !entries.keys.contains(id) {
+            return []
+        }
+        if var existing = entries[id] {
+            weightsTotalBytes -= existing.weightsBytes
+            tickCounter &+= 1
+            existing.lastTouched = Date()
+            let newPinned = existing.pinned || pinned
+            entries[id] = Entry(
+                id: existing.id,
+                weightsBytes: weightsBytes,
+                pinned: newPinned,
+                lastTouched: existing.lastTouched,
+                tick: tickCounter
+            )
+            weightsTotalBytes += weightsBytes
+            return []
+        }
+        let eviction = evictForSpaceSync(neededBytes: weightsBytes, except: id)
+        tickCounter &+= 1
+        let entry = Entry(
+            id: id,
+            weightsBytes: weightsBytes,
+            pinned: pinned,
+            lastTouched: Date(),
+            tick: tickCounter
+        )
+        entries[id] = entry
+        weightsTotalBytes += weightsBytes
+        return eviction
+    }
+
+    /// Sync version of `evictForSpace` — used by `registerSync` so
+    /// the whole register/evict path can stay inside one actor
+    /// continuation. Same policy, just synchronous.
+    func evictForSpaceSync(neededBytes: Int64, except: String? = nil) -> [String] {
+        var evicted: [String] = []
+        while weightsTotalBytes + neededBytes > cacheBudgetBytesStorage {
+            let victim = entries.values
+                .filter { !$0.pinned && $0.id != except }
+                .min { $0.tick < $1.tick }
+            guard let victim else { break }
+            guard let removed = entries.removeValue(forKey: victim.id) else {
+                break
+            }
+            weightsTotalBytes -= removed.weightsBytes
+            evicted.append(victim.id)
+        }
+        return evicted
+    }
+
     public func touch(id: String) async -> Bool {
         guard var entry = entries[id] else { return false }
         tickCounter &+= 1

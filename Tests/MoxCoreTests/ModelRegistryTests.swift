@@ -60,52 +60,66 @@ struct ModelRegistryTests {
     @Test("register evicts the least-recently-touched non-pinned entry")
     func evictsLRU() async throws {
         let r = makeRegistry(budget: 100 * Self.MiB)
-        _ = await r.register(id: "a", weightsBytes: 40 * Self.MiB)
-        try await Task.sleep(nanoseconds: 5_000_000) // 5 ms
-        _ = await r.register(id: "b", weightsBytes: 40 * Self.MiB)
-        try await Task.sleep(nanoseconds: 5_000_000)
-        _ = await r.register(id: "c", weightsBytes: 40 * Self.MiB)
-        // v0.8.7 — tickCounter (UInt64, actor-isolated) gives a
-        // total order across back-to-back registers, but the
-        // strict victim identity (`evicted == ["a"]`) is still
-        // non-deterministic in practice: the actor scheduler can
-        // process the test's awaits in a different order than the
-        // test code writes them, which scrambles the order in
-        // which tickCounter increments land on the dict. Marked
-        // withKnownIssue until v0.8.8 introduces a deterministic
-        // single-thread harness.
-        try await withKnownIssue {
-            let evicted = await r.register(id: "d", weightsBytes: 40 * Self.MiB)
-            let snap = await r.snapshot()
-            #expect(snap.entries.map(\.id).sorted() == ["b", "c", "d"])
-        }
+        // v0.10.1 — `registerBatch` runs N registers in one actor
+        // continuation, so the strict victim identity is
+        // deterministic. Before this, the test had to mark itself
+        // `withKnownIssue` because each `await r.register(...)`
+        // round-tripped through the scheduler and could land in
+        // a different order than the test wrote them.
+        let evicted = await r.registerBatch([
+            (id: "a", weightsBytes: 40 * Self.MiB, pinned: false),
+            (id: "b", weightsBytes: 40 * Self.MiB, pinned: false),
+            (id: "c", weightsBytes: 40 * Self.MiB, pinned: false),
+            (id: "d", weightsBytes: 40 * Self.MiB, pinned: false),
+        ])
+        // 4 registers of 40 MiB into a 100 MiB budget:
+        //   a fits (40), b fits (80), c evicts a (80), d evicts b (80).
+        // Last call's eviction list is the 4th, hence ["b"].
+        #expect(evicted == ["b"])
+        let snap = await r.snapshot()
+        #expect(snap.entries.map(\.id).sorted() == ["c", "d"])
     }
 
     @Test("touch refreshes lastTouched and prevents eviction")
     func touchProtects() async throws {
         let r = makeRegistry(budget: 100 * Self.MiB)
-        _ = await r.register(id: "a", weightsBytes: 40 * Self.MiB)
-        try await Task.sleep(nanoseconds: 5_000_000)
-        _ = await r.register(id: "b", weightsBytes: 40 * Self.MiB)
-        try await Task.sleep(nanoseconds: 5_000_000)
+        // v0.10.1 — split the setup into a deterministic batch +
+        // a single async touch + a single async register. The
+        // first batch installs a, b in tick order (a is the LRU
+        // victim); touch refreshes a's tick so b becomes the
+        // LRU; then register c in its own call forces one
+        // eviction, and the victim must be b, not a.
+        await r.registerBatch([
+            (id: "a", weightsBytes: 40 * Self.MiB, pinned: false),
+            (id: "b", weightsBytes: 40 * Self.MiB, pinned: false),
+        ])
         let touched = await r.touch(id: "a")
         #expect(touched)
-        try await Task.sleep(nanoseconds: 5_000_000)
-        _ = await r.register(id: "c", weightsBytes: 40 * Self.MiB)
-        // Same known flake as `evictsLRU`. Weakly assert the
-        // eviction fires; skip the strict victim-order check.
-        let evicted = await r.register(id: "d", weightsBytes: 40 * Self.MiB)
-        #expect(!evicted.isEmpty)
+        // Single async register — schedules with the actor, but
+        // there's only one register call so there's no actor
+        // ordering ambiguity left to reason about.
+        let evicted = await r.register(id: "c", weightsBytes: 40 * Self.MiB)
+        #expect(evicted == ["b"])
         let snap = await r.snapshot()
-        #expect(snap.entries.map(\.id).contains("d"))
-        // Weak assertion only. TickCounter is monotonic but the
-        // strict victim order — `evicted == ["b"]` — depends on
-        // actor scheduling. v0.8.8 will add a deterministic
-        // single-thread harness.
-        try await withKnownIssue {
-            #expect(evicted == ["b"])
-            #expect(snap.entries.map(\.id).sorted() == ["a", "c", "d"])
-        }
+        #expect(snap.entries.map(\.id).sorted() == ["a", "c"])
+    }
+
+    @Test("registerBatch returns the last call's eviction list")
+    func registerBatchReturnsLastEviction() async {
+        let r = makeRegistry(budget: 100 * Self.MiB)
+        // 4 registers of 40 MiB into 100 MiB:
+        //   a fits, b fits, c evicts a, d evicts b.
+        // registerBatch returns the last call's eviction list
+        // (the one from `d`), so the test asserts ["b"].
+        let evicted = await r.registerBatch([
+            (id: "a", weightsBytes: 40 * Self.MiB, pinned: false),
+            (id: "b", weightsBytes: 40 * Self.MiB, pinned: false),
+            (id: "c", weightsBytes: 40 * Self.MiB, pinned: false),
+            (id: "d", weightsBytes: 40 * Self.MiB, pinned: false),
+        ])
+        #expect(evicted == ["b"])
+        let snap = await r.snapshot()
+        #expect(snap.entries.map(\.id).sorted() == ["c", "d"])
     }
 
     @Test("pinned entries are never evicted, even if pressure is high")

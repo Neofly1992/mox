@@ -2,7 +2,24 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
-## v0.10.0 — `mox suggest` + 硬件感知 chat 兜底 (2026-09)
+## v0.10.1 — ModelRegistry registerBatch + `mox suggest` UX 收尾 (2026-09)
+
+### Added
+
+- **`ModelRegistry.registerBatch(_:)`** — `MoxCore.ModelRegistry` 新增公开方法，一次性塞入 `[(id, weightsBytes, pinned)]` 数组，**单次 actor continuation 串行 register**，返回最后一次 register 的 eviction 列表。`registerBatch` 调内部 `registerSync`（不入 public API），后者是 `register` 的同步版本 — 同样的 eviction 策略，只是去掉 `await` 边界，从而在测试里给 LRU victim 顺序一个稳定的 tick 序。生产代码继续用 `register`（与 scheduler 交错是良性的，policy 本身没变）。
+
+### Fixed
+
+- **`mox suggest` 文档注释截断** — v0.10.0 commit 时 patch 损坏，`handleSuggest` 的 doc comment 终止在 "...when" 半句子上。补完为 "Also wired as the fallback for `mox chat` (and `mox -m`) when called without a model id — see the dispatch case above."
+- **`mox suggest` 终端输出顺序错乱** — `tier notes` 之前打印到 stderr 在 recommendations 之后，但 stderr 是 line-flushed 而 stdout 是 line-buffered，TTY 上 notes 跑到 `Detected:` 之前。改为先 stderr 再 stdout，捕获输出顺序与逻辑顺序一致。
+
+### Tests
+
+- **`ModelRegistryTests.evictsLRU` + `touchProtects`** 移除 `withKnownIssue { ... }` 包裹（v0.8.7 / v0.8.8 的承诺兑现），改为 `registerBatch` 驱动 setup 阶段，**严格断言 `evicted == ["b"]` / `["a"]`** 与 `entries` 集合 —— 不再有 actor scheduling flake。
+- **`ModelRegistryTests.registerBatchReturnsLastEviction`** 新增：直接覆盖 `registerBatch` 的合约（last-call eviction 列表 + 4-registration 100 MiB 场景的最终 state）。
+- 全套 MoxCoreTests：**175 / 175 pass，0 known issue**（v0.8.5 时代起的 3 个 `withKnownIssue` 全部清账）。
+
+
 
 ### Added
 

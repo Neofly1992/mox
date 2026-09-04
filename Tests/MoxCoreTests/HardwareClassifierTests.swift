@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import MoxCore
+@testable import MoxShared
 
 /// `HardwareClassifier.parseChip` is a private static — but the second
 /// initializer exposes it via `chipGeneration`, so we exercise every

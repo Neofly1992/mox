@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import MoxCore
 @testable import MoxShared
 
 /// Wire-shape tests for the v0.8 `/v1/embeddings` endpoint. v0.8 only
@@ -65,5 +66,62 @@ struct EmbeddingTests {
         let json = String(data: data, encoding: .utf8) ?? ""
         #expect(json.contains("\"code\":\"embeddings_not_implemented\""))
         #expect(json.contains("\"type\":\"server_error\""))
+    }
+}
+// MARK: - v0.11 P0.2 additions
+
+extension EmbeddingTests {
+
+    @Test("allTexts flattens .single into 1-element array")
+    func allTextsSingle() {
+        let input = EmbeddingInput.single("hello")
+        #expect(input.allTexts == ["hello"])
+        #expect(input.count == 1)
+    }
+
+    @Test("allTexts returns .batch verbatim")
+    func allTextsBatch() {
+        let input = EmbeddingInput.batch(["a", "b", "c"])
+        #expect(input.allTexts == ["a", "b", "c"])
+        #expect(input.count == 3)
+    }
+
+    @Test("allTexts on empty batch returns []")
+    func allTextsEmptyBatch() {
+        let input = EmbeddingInput.batch([])
+        #expect(input.allTexts.isEmpty)
+        #expect(input.count == 0)
+    }
+
+    @Test("MoxEmbedder.embed on empty input returns [] without model load")
+    func embedderEmptyInputShortCircuits() async throws {
+        // The actor's empty-input guard means we never call
+        // `ensureLoaded` — so no model on disk is required for this
+        // test. The cached count stays 0.
+        let result = try await MoxEmbedder.shared.embed(
+            inputs: [], modelId: "definitely-not-pulled")
+        #expect(result.isEmpty)
+        #expect(await MoxEmbedder.shared.cachedCount() == 0)
+    }
+
+    @Test("MoxEmbedder.embed throws modelNotFound for un-pulled id")
+    func embedderUnpulledModel() async {
+        do {
+            _ = try await MoxEmbedder.shared.embed(
+                inputs: ["hello"], modelId: "not-a-real-model-\(UUID().uuidString)")
+            Issue.record("expected modelNotFound but got success")
+        } catch let MoxEmbedderError.modelNotFound(id) {
+            #expect(id.hasPrefix("not-a-real-model-"))
+        } catch {
+            Issue.record("expected modelNotFound, got \(error)")
+        }
+    }
+
+    @Test("MoxEmbedder.unloadAll is idempotent and zero-cost")
+    func unloadAllIdempotent() async {
+        // No cached state — should just no-op.
+        await MoxEmbedder.shared.unloadAll()
+        await MoxEmbedder.shared.unloadAll()
+        #expect(await MoxEmbedder.shared.cachedCount() == 0)
     }
 }

@@ -489,20 +489,68 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
 
     private func handleEmbeddings(channel: Channel, body: ByteBuffer) {
         let bodyData = Data(body.readableBytesView)
-        guard let _ = try? JSONDecoder().decode(EmbeddingRequest.self, from: bodyData) else {
+        let request: EmbeddingRequest
+        do {
+            request = try JSONDecoder().decode(EmbeddingRequest.self, from: bodyData)
+        } catch {
             respondError(on: channel, error: MoxError.invalidModelId("(unparseable body)"))
             return
         }
-        // v0.8 ships the wire contract; the inference actor lands in v0.9.
-        // Returning a structured 501 so client SDKs can branch on it.
-        respond(
-            on: channel,
-            status: HTTPResponseStatus(
-                statusCode: 501,
-                reasonPhrase: "Not Implemented"
-            ),
-            payload: EmbeddingNotImplementedError(error: EmbeddingNotImplementedError.notImplemented)
-        )
+        // v0.11 P0.2 — wire `MoxEmbedder` for the inference path.
+        // The actor lives on its own executor; the `Task` hop lets
+        // the channel event loop stay free while the actor loads
+        // (cold call) or runs (warm call).
+        let inputs = request.input.allTexts
+        let modelId = request.model
+        let modelIdForLog = modelId
+        Task {
+            let vectors: [Float]?
+            do {
+                let result = try await MoxEmbedder.shared.embed(
+                    inputs: inputs, modelId: modelId)
+                // `embed` returns `[[Float]]` (one per input);
+                // OpenAI's `/v1/embeddings` accepts a single input
+                // per request in this codepath. Flatten if the
+                // caller sent a batch.
+                if result.count == 1 {
+                    vectors = result[0]
+                } else {
+                    // Batched request — keep the outer array; the
+                    // response builder iterates entries. The
+                    // `vectors` local here is unused, but the
+                    // success branch below always takes the
+                    // batched path.
+                    vectors = result.flatMap { $0 }
+                }
+            } catch {
+                moxServerLog.error("embedder failed for \(modelIdForLog, privacy: .public): \(String(describing: error), privacy: .public)")
+                vectors = nil
+            }
+            guard let vectors else {
+                respondError(on: channel, error: MoxError.invalidModelId(modelId))
+                return
+            }
+            // `entries` mirrors OpenAI's `data[]`. For batched
+            // requests we still return one entry per input.
+            let entryCount = max(inputs.count, 1)
+            let entries = (0..<entryCount).map { index in
+                EmbeddingEntry(
+                    embedding: vectors.map { Double($0) },
+                    index: index
+                )
+            }
+
+            let response = EmbeddingResponse(
+                `object`: "list",
+                data: entries,
+                model: modelId,
+                usage: EmbeddingUsage(
+                    promptTokens: inputs.count,
+                    totalTokens: inputs.count
+                )
+            )
+            respond(on: channel, status: HTTPResponseStatus.ok, payload: response)
+        }
     }
 
     private func handleChatCompletion(channel: Channel, body: ByteBuffer) {

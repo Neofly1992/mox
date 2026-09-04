@@ -63,6 +63,16 @@ public enum EmbeddingInput: Codable, Sendable, Equatable {
         case .batch(let arr): return arr.count
         }
     }
+
+    /// Flat list of all texts in the request. Empty `batch([])` returns
+    /// `[]`. The server uses this to drive the embedder; a single
+    /// `.single` becomes a 1-element array for uniform processing.
+    public var allTexts: [String] {
+        switch self {
+        case .single(let s): return [s]
+        case .batch(let arr): return arr
+        }
+    }
 }
 
 /// `/v1/embeddings` response shape — mirrors OpenAI's `{object, data, model, usage}`.

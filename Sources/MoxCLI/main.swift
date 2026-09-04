@@ -652,6 +652,7 @@ struct MoxCLI {
 
     /// `mox suggest` — print a hardware-aware default-model recommendation.
     /// Also wired as the fallback for `mox chat` (and `mox -m`) when
+    /// called without a model id — see the dispatch case above.
     static func handleSuggest(args: [String]) async {
         let hardware = HardwareClassifier()
         let suggestion = DefaultModelSuggester().suggest(for: hardware)
@@ -663,9 +664,12 @@ struct MoxCLI {
         }
         let installedMatch = suggestion.recommendedIDs.first(where: installed.contains)
 
+        // Print the tier note to stderr FIRST so it doesn't race
+        // stdout (notes is informational; recommendations are primary).
+        moxStderr(suggestion.notes)
+
         moxPrint("Detected: \(hardware.brandString.isEmpty ? "unknown Mac" : hardware.brandString), \(suggestion.totalRAMGB) GB RAM (\(suggestion.tier.rawValue) tier)")
         if !hardware.isAppleSilicon {
-            moxStderr(suggestion.notes)
             return
         }
         if let installedMatch {
@@ -677,7 +681,6 @@ struct MoxCLI {
             }
             moxPrint("Run: mox pull <id>  then  mox run <id>")
         }
-        moxStderr(suggestion.notes)
     }
     static func handleUpdate(args: [String]) async throws {
         guard let modelId = args.first else {

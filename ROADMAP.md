@@ -235,8 +235,8 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 **动机**：MTPLX 按 M1/M2/M3/M4/M5 + 内存选推荐模型，32 GB 以下推荐 9B、64 GB+ 推荐 27B。
 
 **做法**：
-- `MoxCore.HardwareClassifier`：`uname -m` + `sysctl hw.memsize` + `sysctl machdep.cpu.brand_string`，解析 `m1/m3/m4/m5/unknown`。零 actor / 零 I/O / 纯值类型。
-- `MoxCore.DefaultModelSuggester`：按 `totalRAMGB` → `Tier { toy / small / medium / large }`，输出有序 `recommendedIDs: [String]` + `notes`。Intel 走 Rosetta 兜底。
+- `MoxShared.HardwareClassifier`：`uname -m` + `sysctl hw.memsize` + `sysctl machdep.cpu.brand_string`，解析 `m1/m3/m4/m5/unknown`。零 actor / 零 I/O / 纯值类型。v0.10.1 起从 `MoxCore` 迁到 `MoxShared` —— `MoxGUIClient` 依赖 `MoxShared` 而不依赖 `MoxCore`，迁过去之后 GUI 可以直接用，无需 RPC 代理。
+- `MoxShared.DefaultModelSuggester`：按 `totalRAMGB` → `Tier { toy / small / medium / large }`，输出有序 `recommendedIDs: [String]` + `notes`。Intel 走 Rosetta 兜底。同步迁到 `MoxShared`。
 - `mox suggest` 子命令：打印 `Detected: <brand>, <N> GB RAM (<tier> tier)` + 有序推荐，第一项已装时标记 `(already installed)`，否则给 `mox pull <id>  then  mox run <id>` 提示。
 - `mox chat`（含 `mox -m`）无 model id 时改为 fallback 到 `handleSuggest` —— 用户第一次敲 `mox chat` 不再撞 "Model ID required" 错误，而是先看到硬件感知推荐，再显式 `mox chat <id>` 进 REPL。
 

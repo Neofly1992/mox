@@ -17,14 +17,18 @@ v0.x releases may include breaking protocol changes documented inline.
 
 - **`ModelRegistryTests.evictsLRU` + `touchProtects`** 移除 `withKnownIssue { ... }` 包裹（v0.8.7 / v0.8.8 的承诺兑现），改为 `registerBatch` 驱动 setup 阶段，**严格断言 `evicted == ["b"]` / `["a"]`** 与 `entries` 集合 —— 不再有 actor scheduling flake。
 - **`ModelRegistryTests.registerBatchReturnsLastEviction`** 新增：直接覆盖 `registerBatch` 的合约（last-call eviction 列表 + 4-registration 100 MiB 场景的最终 state）。
-- 全套 MoxCoreTests：**175 / 175 pass，0 known issue**（v0.8.5 时代起的 3 个 `withKnownIssue` 全部清账）。
+- MoxCoreTests 在 v0.10.1 LRU 改造后：**175 / 175 pass，0 known issue**（v0.8.5 时代起的 3 个 `withKnownIssue` 全部清账）。
 
+### Moved
 
+- **`HardwareClassifier` + `DefaultModelSuggester` 从 `MoxCore` 迁到 `MoxShared`** — 两个文件本身只 `import Foundation + Darwin`，对 `MoxCore` 零依赖；`MoxShared` 是 `MoxGUIClient` 唯一被允许依赖的 leaf target，迁过去后 GUI 可以直接用，无需绕 RPC 或拽 `MoxCore` 进 GUI target。**注意 CHANGELOG v0.10.0 那两条 `Sources/MoxCore/...` 路径已过时**——本文写作时已统一为 `Sources/MoxShared/...`。测试文件路径 `Tests/MoxCoreTests/HardwareClassifierTests.swift` / `DefaultModelSuggesterTests.swift` 保留（target 仍能 `@testable import MoxShared`），仅 import 从 `@testable import MoxCore` 改为 `@testable import MoxShared`。
+
+### Added (GUI)
 
 ### Added
 
-- **`Sources/MoxCore/HardwareClassifier.swift`** — `Sendable struct`，只读探测：`uname -m`（arm64 vs Intel）、`sysctl hw.memsize`（bytes）、`sysctl machdep.cpu.brand_string`（"Apple M4 Pro" → 解析为 `m1/m3/m4/m5/unknown`）。`parseChip` 检查顺序 m5→m4→m3→m1（避免 m5 被 m 截断）。零 I/O 零 actor，纯 Swift。
-- **`Sources/MoxCore/DefaultModelSuggester.swift`** — `Sendable struct` + 嵌套 `Suggestion { recommendedIDs, totalRAMGB, tier, notes }`。按 RAM 分四档：`< 16 GB` → toy (sub-2B)；`16-32 GB` → small (7-9B 4-bit)；`32-64 GB` → medium (14-27B 4-bit)；`64+ GB` → large (32-72B 4-bit)。Intel Mac 短路过 MLX 推荐，输出 Rosetta / 非 MLX 后端的 note（仍占 tier=.toy，避免静默失败）。
+- **`Sources/MoxShared/HardwareClassifier.swift`**（v0.10.1 起从 `MoxCore` 迁出） — `Sendable struct`，只读探测：`uname -m`（arm64 vs Intel）、`sysctl hw.memsize`（bytes）、`sysctl machdep.cpu.brand_string`（"Apple M4 Pro" → 解析为 `m1/m3/m4/m5/unknown`）。`parseChip` 检查顺序 m5→m4→m3→m1（避免 m5 被 m 截断）。零 I/O 零 actor，纯 Swift。
+- **`Sources/MoxShared/DefaultModelSuggester.swift`**（v0.10.1 起从 `MoxCore` 迁出） — `Sendable struct` + 嵌套 `Suggestion { recommendedIDs, totalRAMGB, tier, notes }`。按 RAM 分四档：`< 16 GB` → toy (sub-2B)；`16-32 GB` → small (7-9B 4-bit)；`32-64 GB` → medium (14-27B 4-bit)；`64+ GB` → large (32-72B 4-bit)。Intel Mac 短路过 MLX 推荐，输出 Rosetta / 非 MLX 后端的 note（仍占 tier=.toy，避免静默失败）。
 - **`mox suggest`** — 新 CLI 子命令，打印 `Detected: <brand>, <N> GB RAM (<tier> tier)` + 有序推荐列表。如果推荐的第一项已 `mox pull` 过本地有，标 `(already installed)`；否则提示 `Run: mox pull <id>  then  mox run <id>`。
 - **`mox chat`（含 `mox -m`）无 model id 时不再报错** — 改为 fallback 到 `handleSuggest`，让用户看到硬件感知推荐后重跑 `mox chat <id>` 显式启动 REPL。理由：用户刚装好 mox 第一次敲 `mox chat` 时，"缺 model id" 错误没告诉他该选哪个；推荐比错误更友好。
 

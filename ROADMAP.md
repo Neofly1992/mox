@@ -72,11 +72,10 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 **不做**：把 `RequestPolicy` 抽象成 protocol / 反射注册。Swift enum + 函数足够。
 
----
-
 ## v0.8 — 工具调用 + 模型路由 ✅ v0.8.0 已交付 (2026-08)
 
-### 8.1 Tool calling parser registry ✅ (基础版 — 单 XML parser 覆盖 Qwen/Llama/Mistral/DeepSeek)
+### 8.1 Tool calling parser registry ✅ (基础版 — 单 XML parser 覆盖 Qwen/Llama/Mistral/DeepSeek) — 见 §11 上游 6 个 parser 评估 v0.11 P2
+
 
 **动机**：omlx 暴露 8+ 个 family parser（Llama/Qwen/DeepSeek/Qwen3.5 XML/Gemma/GLM/MiniMax/Mistral/Kimi K2/Longcat）。Claude Code 走 Anthropic tool_use 协议，**不支持 tool call 等于失去 agent 用户群**。当前 mox 走 400 拒，是 v0.6 文档里最大的"未交付"项。
 
@@ -148,7 +147,7 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 **不做**：跨 source 切换（huggingface ↔ modelscope 互转）；那是 source registry 层面的事。
 
-### 8.5 `/v1/embeddings` 框架 ✅ (wire 完整 + 501 Not Implemented)
+### 8.5 `/v1/embeddings` 框架 ✅ (wire 完整 + 501 Not Implemented) — 实装推到 v0.11 P0（接 MLXEmbedders 上游 4 模型）
 
 **动机**：MTPLX 把 embedding/rerank 同 daemon 跑，agent memory 不用起第二个 server。**注意：mlx-swift 生态 embedding 支持还在演进，框架先做、模型后接。**
 
@@ -165,7 +164,7 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 ## v0.9 — 格式转换 + KV 缓存 + 性能
 
-### 9.0 `mox convert` + `mox re-quantize` CLI
+### 9.0 `mox convert` + `mox re-quantize` CLI ✅ v0.9.0 已交付 (2026-09)
 
 **动机**：现在 `mox pull Qwen/Qwen2.5-7B-Instruct` 只能拿到 14 GB bf16 原始权重，要么强迫用户自己用 Python 工具转 MLX 4-bit，要么就硬吃 14 GB 跑（慢、内存高）。这两条都违背 DESIGN §0 "Mox 不引入 Python 依赖"——前者把用户赶到 Python，后者逼 mox 启动吃 14 GB。`mox convert` 一行命令搞定。
 
@@ -184,7 +183,7 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 **不做**：custom apply 函数（DESIGN §15.2.1 的 `quantize` 第三个重载，留给需要 per-layer 自定义配置的极小众场景）；MLX-Python 的 AWQ / GPTQ 算法（mlx-swift 没暴露）；跨量化格式互转（`mlx-community` 转 `MLX` 已有 `--quant-palette` 之类工具，不是 mox 的责任）。
 
-### 9.1 Prefix hash + block sharing in RAM
+### 9.1 Prefix hash + block sharing in RAM ⏳ 写了未做 — 推到 v0.12+ (等上游 KVCache API)
 
 **动机**：长 agent session 里 system prompt + 工具描述 + 前几轮对话几乎不变，prefix cache 命中省一次完整 prefill。omlx block hash + CoW 设计的核心动机；MTPLX SessionBank warm prefix 是同思路。
 
@@ -192,8 +191,7 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 - 新建 `MoxCore.PrefixCache` actor：`(prefixTokenHash → KVCacheHandle)` 表。
 - hash 算法：rolling hash over token id 序列，每 256 token 算一个 block hash（omlx block size）。
 - 请求进入时 tokenize → 算前缀 hash → 命中块数 → 只对未命中部分 prefill。
-- mlx-swift-lm 的 KVCache 如果不暴露底层引用，**就在 MoxCore 层维护一个 `Token[] → Array` 的引用映射**，命中时把已有 arrays `mx.array` 引用塞回去（mx 是 reference-counted，可行）。
-- 单请求内 cache miss 也走 prefix cache 路径（多轮同一 session 加速）。
+- mlx-swift-lm 的 KVCache 如果不暴露底层引用，**就在 MoxCore 层维护一个 `Token[] → Array` 的引用映射**，命中时把已有 arrays `mx.array` 引用塞回去（mx 是 reference-counted，可行）。**截至 mlx-swift-lm 3.31.3 KVCache 仍为 opaque，引用级 CoW 无法在 mox 层实现**；v0.12+ 需先看上游 API 进展。
 
 **验证**：
 - Benchmark：同一 system prompt + 工具描述（~500 tokens），第二次发起同 prompt 请求，prefill 时间降到 < 20%。
@@ -201,21 +199,16 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 **不做**：SSD tier（v1.0+）；CoW 的 CoW（mlx-swift KV 已是 immutable array，无需 CoW）。
 
-### 9.2 Continuous batching 接入准备
+### 9.2 Continuous batching 接入准备 ⏳ 部分做了 / 关键 API 未到位
 
 **动机**：omlx 抄 vLLM scheduler 跑 mlx-lm `BatchGenerator`，多请求并发时吞吐翻倍。当前 mox 一次一个请求独占 GPU。
 
 **做法**：
 - 短期：MoxServer 加进程级 FIFO 队列，`/v1/chat/completions` 多请求按到达顺序串行处理（single runner + queue），单进程多 client 不再直接 reject。
-- 中期：等 mlx-swift-lm 出 BatchGenerator 绑定（跟踪上游 issue），抄 omlx scheduler 的 request lifecycle（`waiting → running → finished`）做成 Swift actor。
-
-**验证**：
-- 短期：3 个并发 curl，第三个不是立刻 503 而是排队等到第一个结束。
-- 中期：BatchedEngine 真接入后对比 single runner 吞吐（tok/s 总和）。
-
+- 中期：等 mlx-swift-lm 出 BatchGenerator 绑定（跟踪上游 issue），抄 omlx scheduler 的 request lifecycle（`waiting → running → finished`）做成 Swift actor。**截至 mlx-swift-lm 3.31.3 上游无 binding**；v0.11 仅做短期 FIFO 队列（如 §P0.x 或独立 PR），中期推迟到 v0.13+。
 **不做**：scheduler 调度策略（FCFS / SJF / priority）—— 等 batch 真接入了再说。
 
-### 9.3 Reasoning / thinking budget
+### 9.3 Reasoning / thinking budget ⏳ 写了未做 — v0.11 P1
 
 **动机**：Qwen3、DeepSeek-R1、GLM5、Claude 都出 thinking。GUI 默认折叠 thinking 只显示最终回答，开关可切。omlx/MTPLX 都做了。
 
@@ -250,20 +243,189 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 **已知边界**：`HardwareClassifier` 只解析到 m5；m6 / 未来世代走 `.unknown` —— 不会 crash，但 RAM tier 仍按实测字节判断，所以推荐逻辑不会失真。
 
 ---
+## v0.11 — 客户端可用 + 协议补齐 + mlx-swift-lm 上游能力消费 (2026-09 候选)
+
+**基线**（v0.10.1 + v0.8.7 后）：mox 的服务端能力已经覆盖 90% LLM 工作负载（`/v1/chat/completions` SSE、`/v1/completions`、`/v1/messages`、`/v1/embeddings` wire、`/v1/rerank` 端点、`mox convert`、KV budget、增量下载、硬件感知 default）。但 **客户端 GUI 是 0 输入框的空架子**，**`/v1/embeddings` 是 501 stub**，**mlx-swift-lm 已经提供的 VLM/Embedders/多家族 tool parser 一行没接**。v0.11 的目标就是把"已规划但没做"和"上游已经做好但没接"这两类一并清账。
+
+**排序原则**（每条按"用户感知 × 工程量"性价比）：
+- **P0**：用户每天都撞上，0 阻碍（基础设施已就位）
+- **P1**：用户能感知痛点 / 写了没做，工程量小-中
+- **P2**：未来价值，当前不阻塞用户
+
+### P0.1 GUI chat UI（输入框 + 消息流 + tok/s 显示）— 最大单点缺口
+
+**动机**：GUI 现在是 4 个 tab 框架，**ChatsTab 没有输入框**——`AppState.currentConversation` / `messages: [ChatMessage]` / `MoxAPIClient.chat()` 全部就位，**只缺 SwiftUI 视图层调它**。omlx `AppView/Screens/Chats` 12.6k Swift、MTPLX `MTPLXAppHost/Views/Chat` 1.9k+3.4k Swift 是真客户端体量；mox 的 857 行 GUI 是"骨架"不是"应用"。**这是 mox 当前最大的"规划了没做"**。
+
+**做法**：
+- `Sources/MoxGUI/MainWindow.swift` — `ChatsTab` 加三件套：
+  - **消息流**：`ScrollView` + `LazyVStack` 渲染 `appState.currentConversation?.messages`，user/assistant 气泡样式，timestamp + role label。
+  - **输入框**：`TextField` + `Button("Send ⌘↩")` 调 `appState.sendUserMessage(text:)`。
+  - **tok/s 实时指示**：assistant 消息尾巴显示 `completion_tokens + tok/s`，从流式 chunk 末段算。
+- `Sources/MoxGUI/MoxApp.swift` — `AppState` 加 `func sendUserMessage(text: String) async`：append user message → `client?.chat(modelId:, messages:, stream: true)` → iterate `AsyncStream<String>` → append assistant delta → 末尾把 usage / tok/s 写回 message metadata。
+- 流式取消：`client?.cancelChat()`（已就位）+ UI 上 `Button("Stop")` 在流式生成中显示。
+- 错误展示：assistant 气泡变红 + 重试按钮。
+
+**验证**：
+- 起 daemon + 在 GUI 选 model + 发消息 → assistant 流式出现，文字 + tok/s 正确。
+- 切换 conversation（`⌘N`）→ 上下文清空，新消息走新 conversation。
+- 取消按钮中途 stop → assistant 消息以 "stopped" 标记结尾。
+- 持久化：v0.11 仍 in-memory（v0.12 接 SQLite），刷新窗口会丢。
+
+**不做**：Markdown 渲染（v0.12 再说）；tool call 折叠 UI（§11.3 之后）；代码高亮。
+
+### P0.2 `/v1/embeddings` 实装 + 接入 `MLXEmbedders` 上游 4 个模型
+
+**动机**：v0.8.5 已写 wire 框架但 endpoint 返回 501。mlx-swift-lm 3.31.3 已经 ship `MLXEmbedders` product（4 个模型：Bert、NomicBert、Qwen3-Embedding、Gemma3-Embedding + Pooling）。**0 行业务代码，~500 Swift 即可把 501 → 真 200**。RAG / agent memory 用户已经在撞 501 错误。
+
+**做法**：
+- `Sources/MoxServer/Server.swift` — `embeddings` handler 不再返回 501，调 `MLXEmbedders.EmbedderModelContainer`。
+- `Sources/MoxCore/ModelRunner.swift` 加 `embeddingModel: EmbedderModelContainer?`，与 LLM `ModelContainer` 互不干扰（不同 `ModelRegistry` slot）。
+- `Sources/MoxCore/Embedder.swift` — 把 v0.8 留的 actor 协议 stub 换成 MLXEmbedders 实现。
+- `Sources/MoxServer/HTTPRouter.swift` — `/v1/rerank` 同步实装（框架已有，501 → 真 200）。
+- `mox-server` 启动时**懒加载** embedding 模型（首次 `/v1/embeddings` 才 load），不预加载，避免拖累 chat 冷启动。
+
+**验证**：
+- `mox-server start`，跑 `curl -X POST localhost:11555/v1/embeddings -d '{"model":"mlx-community/bge-small-en-v1.5","input":"hello"}'` → 收到 200 + `data: [{embedding: [...], usage: ...}]`。
+- 三种 input 形式：`input: "string"` / `input: ["a","b"]` / `input: [[token_id, ...]]` 全部支持（OpenAI 规范）。
+
+### P0.3 `mox pull` 自动量化 `--mode` 暴露
+
+**动机**：`mox convert --mode mxfp4` 已能用，但 `mox pull` 自动量化路径（v0.9.0 §"pull auto-quantize"）**硬编码 `.affine`**。用户在 64 GB+ 机器上 pull 14B+ bf16 模型默认还是 4-bit affine 路径，不走更精确的 mxfp8。
+
+**做法**：
+- `Sources/MoxCLI/main.swift` — `handlePull` 加 `--quant-mode affine|mxfp4|mxfp8|nvfp4` flag（默认仍 `affine`），透传到 `maybeAutoQuantize`。
+- `Sources/MoxConvertCore/MoxQuant.swift` — `QuantizationOptions.mode` 已经在签名里，**0 行 backend 改动**，只改 CLI 默认值。
+- `CHANGELOG` 加 `mox pull --quant-mode`。
+
+**验证**：`mox pull Qwen/Qwen2.5-7B-Instruct --quant-mode mxfp4` → pull 完 sibling `<id>-4bit-mxfp4/` 目录 + manifest `sourceFormat = "mlx-4bit-mxfp4"`。
+
+**不做**：把默认改 `mxfp4`（affine 仍是生态主流，更稳）。
+
+### P1.1 `mox doctor` — 安装 / 集成诊断
+
+**动机**：omlx `diagnose_command`、MTPLX `doctor --deep` 都有。mox 现在的"安装挂了"反馈链是 `mox-server start` → 失败 → 一行 `Error: ...` → 用户 Google。**`mox doctor` 把这条反馈链改成自动报告**。
+
+**做法**：
+- 新增 `mox doctor` 子命令（`Sources/MoxCLI/main.swift` 加 `handleDoctor`）。
+- 5 步检查：
+  1. **System**：macOS 版本、Apple Silicon 型号、`uname -m`。
+  2. **MLX**：检查 `mlx-swift` / `mlx-swift-lm` 是否能 import（编译时已 OK，runtime 探一次）。
+  3. **Model dir**：`~/.mox/` 路径可写、目录树结构、`mox.json` 解析无错。
+  4. **Daemon**：`launchctl list | grep mox-server` / `mox-server status` / `curl /health`。
+  5. **Network**：HF / ModelScope 端点连通性（HEAD `/`）。
+- 输出 `OK` / `WARN` / `FAIL` 三色 + 修复建议。
+- `--json` flag 给 GUI 消费。
+
+**验证**：
+
+**不做**：自动修复（auto-fix）——只报告，让用户决策。
+
+### P1.2 `/v1/models/{id}/load|unload` endpoint
+
+**动机**：v0.8.6 `ModelRegistry` actor + LRU 已就位，但**没有 HTTP 端点暴露**。omlx `/v1/models/{id}/load`、`/v1/models/{id}/unload` 都有；多模型管理场景下 CLI `mox run` 切模型要重启 daemon，**HTTP 端点让 GUI 一键切**。
+
+**做法**：
+- `Sources/MoxServer/HTTPRouter.swift` 加 2 行：`POST /v1/models/{id}/load` + `POST /v1/models/{id}/unload`。
+- handler 在 `MoxServer.Server.swift`：
+  - `load`：调 `ModelRegistry.register(id:, weightsBytes:)` + `ModelRunner.loadModel(id:)`；已加载返回 200 + `{"id":..., "loaded": true}`；不存在的 id 返回 404。
+  - `unload`：调 `ModelRunner.unloadModel(id:)` + `ModelRegistry.evict(id:)`。
+- 配合 GUI ModelsTab 的每行加 `Load` / `Unload` 按钮（一行 SwiftUI 改动）。
+
+**验证**：
+
+### P1.3 `stream_options.include_usage` 完整实现（§10.4 前移）
+
+**动机**：原 ROADMAP §10.4 规划 v1.0，**v0.11 前移**——Claude Code 等 agent 客户端已用 stream + 算 cost 是真实痛点。`MoxServer` 现在发 SSE 但 usage 字段不填。
+
+**做法**：
+- `Sources/MoxServer/Server.swift` — `chatCompletionsStream` handler 末尾：模型返回 final usage → 多发一个 chunk `{"id":"...","object":"chat.completion.chunk","choices":[],"usage":{...}}` + `data: [DONE]\n\n`。
+
+**验证**：
+
+### P1.4 Reasoning / thinking budget（§9.3 实装）
+
+**动机**：Qwen3、DeepSeek-R1、GLM5、Claude 都出 thinking。GUI 用户期望默认折叠 thinking 只显示 answer。**原 §9.3 一直未做**。
+
+**做法**：
+- `MoxShared.ChatCompletionChoice` 加 `reasoning_content: String?`（OpenAI 兼容扩展字段）。
+
+**验证**：
+
+### P2.1 MLXEmbedders 之外的 4 个 embedding 模型管理
+
+**动机**：P0.2 实现了 `/v1/embeddings`，但需要 model pull 流程。当前 `mox pull` 只支持 LLM。
+
+**做法**：
+- `Sources/MoxCore/ModelManager.swift` — `pullModel` 加 `kind: .llm | .embedder` 区分；embedder 默认 source 用 `mlx-community` 拉 `bge-*` / `nomic-embed-*` / `qwen3-embedding-*`。
+
+### P2.2 MLXVLM 16 个 VLM 模型接入（vision 多模态）
+
+**动机**：mlx-swift-lm 3.31.3 提供 16 个 VLM（Qwen3-VL、Qwen2.5-VL、Gemma3/4、SmolVLM2、Idefics3、Paligemma、FastVLM...）。**0 行业务代码接入 = 当前最大的"上游已做好没接"**。
+
+**做法**：
+- `Sources/MoxCore/ModelRunner.swift` — `loadModel` 探测是 LLM 还是 VLM（`ModelConfiguration.modelType` 字段或目录里 `preprocessor_config.json` 存在）。
+
+**验证**：
+
+### P2.3 Tool parser 改用 mlx-swift-lm 上游 6 个
+
+**动机**：mox 自写 2 个 tool parser（XML + Generic），mlx-swift-lm 已有 8 个（Llama3、Mistral、GLM4、Gemma、KimiK2、Pythonic、JSON、XML）—— 上游 6 个 mox 没接，agent 兼容性受损。
+
+**做法**：
+- `Sources/MoxShared/GenericToolCallParser.swift` 保留作为默认 fallback。
+
+**验证**：
+
+### P2.4 持久化对话历史（SQLite）
+
+**动机**：GUI chat UI（v0.11 P0.1）刷新窗口丢上下文。`AppState` 现在 in-memory `currentConversation: Conversation?`，死亡即丢。
+
+**做法**：
+- `Sources/MoxCore/ConversationStore.swift` — actor over SQLite（GRDB 或自写 `sqlite3` 绑定）。
+
+**不做**：多设备 sync；端到端加密（家用工具定位不需要）。
+
+### P2.5 v0.11 留观 — 上游 API 不稳定 / 不主动造
+
+
+
+## §11 mlx-swift-lm 上游能力清单（决策参考）
+
+**当前 mox 用的版本**：mlx-swift 0.31.6 + mlx-swift-lm 3.31.3（package resolved）。
+
+| 上游 product | 提供什么 | mox 消费？ | 备注 |
+|--------------|---------|-----------|------|
+| `MLX` (核心) | 数组 + Metal backend | ✅ 全部 | — |
+| `MLXNN` (层) | Linear / LayerNorm / quantize API | ✅ 全部 | — |
+| `MLXLLM` (LLM) | 25+ 模型家族 + `LLMModel` + `loadModelContainer` | ✅ 全部 | 主力 |
+| `MLXVLM` (视觉) | **16 个 VLM 模型**（Qwen3-VL、Qwen2.5-VL、Gemma3/4、Pixtral、SmolVLM2、Mistral3、Idefics3、Paligemma、FastVLM、LFM2VL、Qwen35、Qwen35MoE、Qwen2VL、GlmOcr、QwenVL） | ❌ **0 行消费** | **P2.2 接入** |
+| `MLXLMCommon` (共享) | `ChatSession`、`UserInput`、`ModelContainer`、`Tool/Parsers/`（8 个） | ⚠️ 部分：`ModelContainer` ✅，**`Tool/Parsers/` 仅自写 fallback** | P2.3 |
+| `MLXEmbedders` (embedding) | **4 个模型**（Bert、NomicBert、Qwen3-Embedding、Gemma3-Embedding）+ Pooling | ❌ **0 行消费** | **P0.2 接入** |
+| `MLXHuggingFace` (HF 集成) | tokenizer / downloader | ✅ 全部 | — |
+| `Tokenizers` | HF tokenizer Swift 绑定 | ✅ 全部 | — |
+| `QuantizationMode { affine, mxfp4, mxfp8, nvfp4 }` | 4 种 quant mode | ⚠️ `mox convert` 已暴露 3 种，**`mox pull` 自动量化仍硬编码 affine** | P0.3 |
+| `Speculative decoding` | **mlx-swift-lm 没有此 API** | — | **明确不做**（mox 不造 kernel） |
+| `MTP / multi-token prediction` | **mlx-swift-lm 没有此 API** | — | **明确不做** |
+| `BatchGenerator`（vLLM-style 连续批处理） | **mlx-swift-lm 3.31.3 仍无 Swift 绑定** | — | §9.2 推到等上游 |
+| `KVCache 引用访问`（prefix cache 关键） | **mlx-swift-lm 没暴露底层引用** | — | §9.1 推到 v0.12+ |
+
+**决策原则**：凡是 mlx-swift-lm 已经做的，**mox 直接调上游 API，不重写**。凡是上游没做的，**不造**（避免 DESIGN §0 偏离）。这一原则下：
+
+
 
 ## v1.0 — 多 tier + 周边工具
 
-### 10.1 Paged SSD cold tier
+### 10.1 Paged SSD cold tier ⏳ 等 §9.1 prefix cache（v0.12+）
 
 **动机**：omlx 把 SSD cold tier 当核心卖点，long session 跨 restart 恢复 prefix cache。
 
-**做法**：在 9.1 PrefixCache 基础上加 SSD spillover：RAM 预算满时，evicted blocks 写 `~/.mox/cache/blocks/<hash>.safetensors`；下次请求命中 hash 时 mmap 读回 RAM。
+**做法**：在 9.1 PrefixCache 基础上加 SSD spillover：
 
 **验证**：80% 内存占用下，session 重启后第一次请求命中冷盘 block，prefill 加速。
 
 **不做**：分布式 KV 缓存（无场景）。
 
-### 10.2 Web admin dashboard
+### 10.2 Web admin dashboard ⏳ 等 v0.11 GUI chat UI 稳定
 
 **动机**：omlx `/admin` 完整 Web UI 抢了很多"非技术用户"。**注意**：mox 有 SwiftUI GUI，这个 dashboard 只是补充，给远程 / headless 场景用。
 
@@ -277,7 +439,7 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 **不做**：把 `/admin` 做成完全功能 GUI（chat、benchmark 等）—— 那是 SwiftUI 的事。
 
-### 10.3 Benchmark runner
+### 10.3 Benchmark runner ⏳ 等 §9.1 prefix cache（v0.12+）才有意义
 
 **动机**：omlx 一键 PP/TG + partial prefix cache 测试；MTPLX 内置 AIME benchmark。**对用户选模型、调参有直接价值。**
 
@@ -290,21 +452,13 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 **不做**：AIME / MMLU 这类任务评测（学术评测，工具定位不需要）。
 
-### 10.4 OpenAI `stream_options.include_usage` 完整实现
-
-**动机**：Claude Code 等客户端需要 usage chunk 来算成本。
-
-**做法**：在 7.1 SSE 路径里加 usage 字段发送逻辑。`completion_tokens` / `prompt_tokens` / `total_tokens` 从 `ModelRunner` 拿。
-
-**验证**：客户端收到 usage 字段不为 null；非流式请求也带 usage。
-
-**不做**：cost 计算（无价格数据源）。
+### 10.4 OpenAI `stream_options.include_usage` 完整实现 — **前移到 v0.11 §P1.3**（Claude Code 用户痛点）
 
 ---
 
 ## 明确不学
 
-- **Speculative decoding Metal kernel 优化**：不在 Swift 生态内可控，等上游或外包。
+- **Speculative decoding Metal kernel 优化**：mlx-swift-lm 0.31.6 / 3.31.3 都没暴露此 API；mox 不写自研 kernel = 违反 DESIGN §0。v0.11 §P2.5 显式不做。
 - **多 Mac 集群（omlx Ring/JACCL）**：复杂度炸裂，市场小。
 - **MTPLX 多家族 patch 文件**（`deepseek_v4_*.py` × N）：Python 缺类型的 namespace 退化，Swift enum 一行解决。
 - **MTPLX 多档 scheduler_mode**（serial / cooperative / ar_batch / mtp_batch）：Swift actor 模型不需要 ownership contract 这种 GIL 妥协。
@@ -325,55 +479,26 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 不为对齐竞品丢这些。
 ---
 
-## 下次会话从这里开始（v0.9.0 续做 #2）
+## 下次会话从这里开始（v0.11 P0 候选，2026-09）
 
-**已完成**（v0.9.0 第一波）：
-- `Sources/MoxConvertCore/MoxQuant.swift` —— `MoxQuant.quantize(sourceDirectory:options:)` 核心 pipeline 实装。
-- `Sources/MoxCLI/main.swift` —— `mox convert` / `mox re-quantize` / `requantize` 三个 dispatch + `handleConvert` + `handleRequantize` + `printConvertHelp` + `directorySize` 帮助函数；`printHelp` 加新命令和示例。
-- `CHANGELOG.md` v0.9.0 "Added (shipped)" 收 CLI 两条。
-- `swift build` + `swift test` 全绿（132 tests pass）。
+v0.10.1 已交付（4 commits / +803 / -54 lines / 193 tests pass）。下次会话的 v0.11 P0 候选按"用户感知 × 工程量"排：
 
-**v0.9.0 续做 #2 目标**：补 §9.0 步骤 5/6 —— (a) 集成测试覆盖 `MoxQuant.quantize` 全流程；(b) `mox pull` 后置钩子自动把 bf16/fp16/fp32 转 4-bit，manifest 写明量化 provenance。这两块收掉后，v0.9.0 才能 tag。
+**P0**（每天都撞上，0 阻碍）：
+- **P0.1 GUI chat UI** — `Sources/MoxGUI/MainWindow.swift` `ChatsTab` 加输入框 + 消息流 + tok/s 实时显示；`Sources/MoxGUI/MoxApp.swift` `AppState` 加 `sendUserMessage(text:)` 流式调 `MoxAPIClient.chat()`。**最大单点缺口**。
+- **P0.2 `/v1/embeddings` 实装** — `Sources/MoxServer/Server.swift` 把 501 stub 换成 `MLXEmbedders.EmbedderModelContainer` 调用；`Sources/MoxCore/Embedder.swift` actor 协议换成 MLXEmbedders 实现；`/v1/rerank` 同步实装。mlx-swift-lm 3.31.3 已 ship 4 embedding 模型，0 行业务代码即可从 501 → 200。
+- **P0.3 `mox pull --quant-mode` flag** — `Sources/MoxCLI/main.swift` `handlePull` 加 `--quant-mode affine|mxfp4|mxfp8|nvfp4` 透传；`mox convert --mode` 已有，pull 路径仅 0 后端改动。
 
-**具体步骤**（按顺序做，每个 ~30 分钟）：
+**P1**（用户能感知痛点）：
+- **P1.1 `mox doctor`** — `Sources/MoxCLI/main.swift` 新增 `handleDoctor`；5 步检查（System / MLX / model dir / daemon / network）+ `--json` flag。
+- **P1.2 `/v1/models/{id}/load|unload` endpoint** — `Sources/MoxServer/HTTPRouter.swift` 加 2 行路由；`Sources/MoxServer/Server.swift` handler 调现有 `ModelRegistry` + `ModelRunner`。v0.8.6 基础设施已就位，~100 Swift。
+- **P1.3 `stream_options.include_usage`**（§10.4 前移）— `Sources/MoxServer/Server.swift` `chatCompletionsStream` 末尾多发 `{"choices":[],"usage":{...}}` chunk。~200 Swift。
+- **P1.4 Reasoning / thinking budget**（§9.3 实装）— `MoxShared.ChatCompletionChoice.reasoning_content` 字段 + GUI 折叠 toggle。~1k Swift。
 
-1. **`Tests/MoxCoreTests/MoxQuantIntegrationTests.swift`** —— 临时目录 + 假 `config.json`（model_type=torch_dtype=bfloat16）+ dummy `.safetensors`，调 `MoxQuant.quantize(...)` 跑全流程。期望：
-   - 真实 MLX model container 加载会失败（缺 hidden_size 等真实字段），但失败必须是**结构化的 loader 错误**，不是 panic / trap。
-   - 验证 `QuantizationOptions.outputDirectory` 目录被创建。
-   - 这是 CI 烟雾，不是真量化产物验证（真产需要真权重）。
-2. **`Sources/MoxConvertCore/MoxQuant.swift`** —— 让 `MoxQuant.quantize` 写入 output 目录时，**在 `config.json` 里塞入 `quantization_config`** 字段（`{"group_size": ..., "bits": ...}`）。这样：
-   - 下次 `MoxConverter.inspect(at:)` 在该目录上能正确归类为 `.mlxQuantized`。
-   - 不影响 mlx-swift-lm 加载（上游靠 weights 里的 `.scales` 判定，不是 config.json 字段），但**与生态约定一致**。
-3. **`Sources/MoxCLI/main.swift` 的 `handlePull`** —— pull 成功后：
-   - 调 `MoxConverter().inspect(at: destinationDir)`。
-   - 若 `.hfPrecision(let dtype)` → 默认 4-bit/64/affine 触发 `MoxQuant.quantize(...)` 到 sibling `<dir>-4bit/`；更新 `ModelInfo.path` 指 quantized 目录；改写 manifest 的 `sourceFormat = "mlx-<bits>bit-<mode>"`、`quantization = MoxQuantizationInfo(...)`。
-   - 若 `.mlxQuantized` → 跳过，**已经 quantized 直接用**。
-   - 若 `.unknown` → 不动，保留 v0.5 行为（manifest 里写 "unknown(...)"）。
-   - **分离关注点**：`handlePull` 串两步，**不在 `ModelManager.pullModel` 内部嵌套**。原因：`pullModel` 是 actor 内的纯 I/O，convert 是重计算（内存密集），挂上会让 model manager 难测、难 retry。
-4. **新 flag**：`mox pull --no-auto-quantize` —— 跳过自动 convert，给想要手动控制的人留口子（默认开，opt-out）。
-5. **CHANGELOG v0.9.0**：
-   - "Added (shipped)" 加 `mox pull --no-auto-quantize`、集成测试条目。
-   - "Pending" 段删掉（v0.9.0 已全收）。
-   - 顶部版本标题从 `(in progress)` 改 `(2026-09)`，或者干脆加 `v0.9.0` tag 再写 release notes。
-6. **commit + push**。
+**P2**（v0.12+ 再说）：
+- **P2.1-2.4** — embedding 模型管理 / MLXVLM 16 个 VLM 接入 / 用 mlx-swift-lm 上游 6 个 tool parser 替自写 / 持久化对话（SQLite）。
 
-**关键文件**：
-- `Sources/MoxConvertCore/MoxQuant.swift` —— 写入 `config.json` 增量。
-- `Sources/MoxCLI/main.swift` —— `handlePull` 增量 + `--no-auto-quantize` 解析。
-- `Sources/MoxCore/ModelManager.swift` —— **不改**。`pullModel` 边界不变；convert 在 `handlePull` 这一层串。
-- `Sources/MoxShared/Models.swift` —— `ModelManifest.quantization: MoxQuantizationInfo?` 字段已经存在，直接复用。`sourceFormat` 是 String 不动，新值 `mlx-4bit-affine` 写进去即可。
-- `Tests/MoxCoreTests/MoxQuantIntegrationTests.swift` —— 新文件。
+**P2.5 明确不做的**：Speculative decoding（mlx-swift-lm 没 API，违反 DESIGN §0）、Paged SSD cold tier、Cluster 分布式、MTP（mlx-swift-lm 没 API）。
 
-**注意点**：
-- **不要在 `pullModel` 内部调 `MoxQuant.quantize`** —— 那是 actor 内，convert 是重计算 + 大内存分配，把 actor 卡住会让所有并发的 `listModels` / `modelInfo` 都阻塞。`handlePull` 是 `async throws` 的函数，串两步最自然。
-- `MoxQuant.quantize` 的输入是 `sourceDirectory`，写 `config.json` 之前要小心：源目录可能是同一个用户目录（`mox convert` 时），也可能不是（`mox pull` 时源 = pull 出的目录，输出 = `<dir>-4bit/` sibling）。**只写 outputDirectory 的 config.json，不动 sourceDirectory**。
-- bf16 → 4-bit 默认触发 = 用户可能不想要（16 GB 内存紧的机器上转 7B 可能挂）。但 `mox pull` 文档默认就是 "给你一个能用的模型"，不量化就不能用 —— 默认开是合理的，opt-out 已经设计。
-- v0.9 不做：HF id 触发 convert 的路径（即直接 `mox convert Qwen/X` 不经过 `mox pull`，要解析 HF 重定向等）；re-quantize 的 bit-width 检测（要读 weights metadata）。
-
-**验证 checklist**（完成后 grep）：
-- [ ] `MoxQuantIntegrationTests` 在 `Tests/MoxCoreTests/` 下，3+ 测试
-- [ ] `mox convert` 写出的目录的 `config.json` 含 `quantization_config`
-- [ ] `mox pull Qwen/Qwen2.5-0.5B-Instruct --source huggingface`（用 tiny fixture 或者断网 mock）后，`destinationDir` 的 `mox.json` `sourceFormat = "mlx-4bit-affine"`，且 sibling `<id>-4bit/` 存在 model.safetensors
-- [ ] `mox pull --no-auto-quantize` 不触发 convert，manifest 保留 `huggingface-bfloat16`
-- [ ] CHANGELOG v0.9.0 "Pending" 段为空，顶部日期填上
-- [ ] 132+3 = 135+ 测试全过
+**进入 v0.11 实施前先决条件**：
+- ROADMAP §11 上游能力清单的"mox 消费"列已经从 ❌ 改为 P0/P1/P2 项。
+- 决策 P0 是否要在 v0.10.2 hotfix 之后立刻做（避免空挡）。

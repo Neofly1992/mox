@@ -88,6 +88,11 @@ struct MoxCLI {
         var modelId: String?
         var source: ModelSource = .huggingface
         var autoQuantize = true
+        // v0.11 P0.3 — pick a quant mode for the auto-quantize pass.
+        // Default stays `.affine` (the mlx-community default and the
+        // most battle-tested mode); power users on 64 GB+ can opt
+        // into mxfp4/mxfp8 for better quality at 4-bit / 8-bit.
+        var quantMode: QuantizationMode = .affine
 
         var i = 0
         while i < args.count {
@@ -120,6 +125,23 @@ struct MoxCLI {
                 // their machine can't afford the extra peak memory
                 // that `mox convert` adds on top of the download.
                 autoQuantize = false
+            case "--quant-mode":
+                // v0.11 P0.3 — pick the quant mode for the auto-quantize
+                // pass. Mirrors `mox convert --mode`. Default
+                // `affine`; mxfp4 / mxfp8 / nvfp4 available for
+                // 64 GB+ hosts. Invalid value exits with a usage hint.
+                i += 1
+                if i < args.count {
+                    switch args[i].lowercased() {
+                    case "affine": quantMode = .affine
+                    case "mxfp4": quantMode = .mxfp4
+                    case "mxfp8": quantMode = .mxfp8
+                    case "nvfp4": quantMode = .nvfp4
+                    default:
+                        moxPrint("Unknown --quant-mode: \(args[i]) (expected affine|mxfp4|mxfp8|nvfp4)")
+                        return
+                    }
+                }
             default:
                 if modelId == nil {
                     modelId = args[i]
@@ -130,7 +152,7 @@ struct MoxCLI {
 
         guard let id = modelId else {
             moxPrint("Error: Model ID required")
-            moxStderr("Usage: mox pull <model-id> [--source huggingface|modelscope] [--no-auto-quantize]")
+            moxStderr("Usage: mox pull <model-id> [--source huggingface|modelscope] [--no-auto-quantize] [--quant-mode affine|mxfp4|mxfp8|nvfp4]")
             return
         }
 
@@ -154,27 +176,16 @@ struct MoxCLI {
             // v0.9 — auto-convert hook (DESIGN §15.3 path B). Runs
             // *after* `pullModel` returns so the actor's executor
             // isn't held during the heavy quantize pass. Caller has
-            // the option to opt out via `--no-auto-quantize`.
+            // the option to opt out via `--no-auto-quantize`. v0.11
+            // P0.3 — mode now plumbed from `--quant-mode`.
             if autoQuantize {
-                await maybeAutoQuantize(modelInfo: modelInfo)
+                await maybeAutoQuantize(modelInfo: modelInfo, mode: quantMode)
             }
         } catch {
             moxStderr("Error pulling model: \(error.localizedDescription)")
         }
     }
-
-    /// Inspect the just-pulled directory and, if it's raw HF precision
-    /// (bf16/fp16/fp32), produce a sibling 4-bit MLX copy and rewrite
-    /// its manifest so subsequent `mox run` lands on the quantized
-    /// weights. Existing `.mlxQuantized` models are skipped — they're
-    /// already ready. Unknown formats are left untouched (the raw
-    /// directory still works for any future tooling that wants to
-    /// inspect it).
-    ///
-    /// Failures are non-fatal: if quantize errors out, the user still
-    /// has the raw weights. We surface the error to stderr so they
-    /// know to run `mox convert` manually if they want MLX format.
-    private static func maybeAutoQuantize(modelInfo: ModelInfo) async {
+    private static func maybeAutoQuantize(modelInfo: ModelInfo, mode: QuantizationMode) async {
         let sourceURL = URL(fileURLWithPath: modelInfo.path)
         let probe: ModelProbe
         do {
@@ -190,7 +201,7 @@ struct MoxCLI {
 
         let bits = 4
         let groupSize = 64
-        let mode: QuantizationMode = .affine
+        let mode = mode
         let quantURL = sourceURL
             .deletingLastPathComponent()
             .appendingPathComponent("\(sourceURL.lastPathComponent)-\(bits)bit")

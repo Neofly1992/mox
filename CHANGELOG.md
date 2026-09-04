@@ -2,33 +2,12 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
-## v0.10.1 — ModelRegistry registerBatch + `mox suggest` UX 收尾 (2026-09)
+## v0.10.0 — `mox suggest` + 硬件感知 chat 兜底 (2026-09)
 
 ### Added
 
-- **`ModelRegistry.registerBatch(_:)`** — `MoxCore.ModelRegistry` 新增公开方法，一次性塞入 `[(id, weightsBytes, pinned)]` 数组，**单次 actor continuation 串行 register**，返回最后一次 register 的 eviction 列表。`registerBatch` 调内部 `registerSync`（不入 public API），后者是 `register` 的同步版本 — 同样的 eviction 策略，只是去掉 `await` 边界，从而在测试里给 LRU victim 顺序一个稳定的 tick 序。生产代码继续用 `register`（与 scheduler 交错是良性的，policy 本身没变）。
-
-### Fixed
-
-- **`mox suggest` 文档注释截断** — v0.10.0 commit 时 patch 损坏，`handleSuggest` 的 doc comment 终止在 "...when" 半句子上。补完为 "Also wired as the fallback for `mox chat` (and `mox -m`) when called without a model id — see the dispatch case above."
-- **`mox suggest` 终端输出顺序错乱** — `tier notes` 之前打印到 stderr 在 recommendations 之后，但 stderr 是 line-flushed 而 stdout 是 line-buffered，TTY 上 notes 跑到 `Detected:` 之前。改为先 stderr 再 stdout，捕获输出顺序与逻辑顺序一致。
-
-### Tests
-
-- **`ModelRegistryTests.evictsLRU` + `touchProtects`** 移除 `withKnownIssue { ... }` 包裹（v0.8.7 / v0.8.8 的承诺兑现），改为 `registerBatch` 驱动 setup 阶段，**严格断言 `evicted == ["b"]` / `["a"]`** 与 `entries` 集合 —— 不再有 actor scheduling flake。
-- **`ModelRegistryTests.registerBatchReturnsLastEviction`** 新增：直接覆盖 `registerBatch` 的合约（last-call eviction 列表 + 4-registration 100 MiB 场景的最终 state）。
-- MoxCoreTests 在 v0.10.1 LRU 改造后：**175 / 175 pass，0 known issue**（v0.8.5 时代起的 3 个 `withKnownIssue` 全部清账）。
-
-### Moved
-
-- **`HardwareClassifier` + `DefaultModelSuggester` 从 `MoxCore` 迁到 `MoxShared`** — 两个文件本身只 `import Foundation + Darwin`，对 `MoxCore` 零依赖；`MoxShared` 是 `MoxGUIClient` 唯一被允许依赖的 leaf target，迁过去后 GUI 可以直接用，无需绕 RPC 或拽 `MoxCore` 进 GUI target。**注意 CHANGELOG v0.10.0 那两条 `Sources/MoxCore/...` 路径已过时**——本文写作时已统一为 `Sources/MoxShared/...`。测试文件路径 `Tests/MoxCoreTests/HardwareClassifierTests.swift` / `DefaultModelSuggesterTests.swift` 保留（target 仍能 `@testable import MoxShared`），仅 import 从 `@testable import MoxCore` 改为 `@testable import MoxShared`。
-
-### Added (GUI)
-
-### Added
-
-- **`Sources/MoxShared/HardwareClassifier.swift`**（v0.10.1 起从 `MoxCore` 迁出） — `Sendable struct`，只读探测：`uname -m`（arm64 vs Intel）、`sysctl hw.memsize`（bytes）、`sysctl machdep.cpu.brand_string`（"Apple M4 Pro" → 解析为 `m1/m3/m4/m5/unknown`）。`parseChip` 检查顺序 m5→m4→m3→m1（避免 m5 被 m 截断）。零 I/O 零 actor，纯 Swift。
-- **`Sources/MoxShared/DefaultModelSuggester.swift`**（v0.10.1 起从 `MoxCore` 迁出） — `Sendable struct` + 嵌套 `Suggestion { recommendedIDs, totalRAMGB, tier, notes }`。按 RAM 分四档：`< 16 GB` → toy (sub-2B)；`16-32 GB` → small (7-9B 4-bit)；`32-64 GB` → medium (14-27B 4-bit)；`64+ GB` → large (32-72B 4-bit)。Intel Mac 短路过 MLX 推荐，输出 Rosetta / 非 MLX 后端的 note（仍占 tier=.toy，避免静默失败）。
+- **`Sources/MoxCore/HardwareClassifier.swift`**（v0.10.1 起迁到 `MoxShared`，见 v0.10.1 `### Moved`） — `Sendable struct`，只读探测：`uname -m`（arm64 vs Intel）、`sysctl hw.memsize`（bytes）、`sysctl machdep.cpu.brand_string`（"Apple M4 Pro" → 解析为 `m1/m3/m4/m5/unknown`）。`parseChip` 检查顺序 m5→m4→m3→m1（避免 m5 被 m 截断）。零 I/O 零 actor，纯 Swift。
+- **`Sources/MoxCore/DefaultModelSuggester.swift`**（v0.10.1 起迁到 `MoxShared`） — `Sendable struct` + 嵌套 `Suggestion { recommendedIDs, totalRAMGB, tier, notes }`。按 RAM 分四档：`< 16 GB` → toy (sub-2B)；`16-32 GB` → small (7-9B 4-bit)；`32-64 GB` → medium (14-27B 4-bit)；`64+ GB` → large (32-72B 4-bit)。Intel Mac 短路过 MLX 推荐，输出 Rosetta / 非 MLX 后端的 note（仍占 tier=.toy，避免静默失败）。
 - **`mox suggest`** — 新 CLI 子命令，打印 `Detected: <brand>, <N> GB RAM (<tier> tier)` + 有序推荐列表。如果推荐的第一项已 `mox pull` 过本地有，标 `(already installed)`；否则提示 `Run: mox pull <id>  then  mox run <id>`。
 - **`mox chat`（含 `mox -m`）无 model id 时不再报错** — 改为 fallback 到 `handleSuggest`，让用户看到硬件感知推荐后重跑 `mox chat <id>` 显式启动 REPL。理由：用户刚装好 mox 第一次敲 `mox chat` 时，"缺 model id" 错误没告诉他该选哪个；推荐比错误更友好。
 
@@ -41,6 +20,32 @@ v0.x releases may include breaking protocol changes documented inline.
 
 - `mox help` 增加 `suggest` 条目；`chat` 行加上 `omit id for a hardware-aware recommendation` 提示。
 
+## v0.10.1 — ModelRegistry registerBatch + `mox suggest` UX 收尾 + GUI helper (2026-09)
+
+### Added
+
+- **`ModelRegistry.registerBatch(_:)`** — `MoxCore.ModelRegistry` 新增公开方法，一次性塞入 `[(id, weightsBytes, pinned)]` 数组，**单次 actor continuation 串行 register**，返回最后一次 register 的 eviction 列表。`registerBatch` 调内部 `registerSync`（不入 public API），后者是 `register` 的同步版本 — 同样的 eviction 策略，只是去掉 `await` 边界，从而在测试里给 LRU victim 顺序一个稳定的 tick 序。生产代码继续用 `register`（与 scheduler 交错是良性的，policy 本身没变）。
+- **`MoxGUIClient.HardwareSuggestion`** — `Sources/MoxGUIClient/AppStateHelpers.swift` 新增 Sendable+Equatable 包装：`HardwareSuggestion.current(installedModelIDs:)` 一次返回 hardware + tier + 推荐 + 已装匹配 + 注释。`MoxGUIClient` 此前只能依赖 `MoxShared`，迁过去之后 GUI 可以直接在 Models tab 渲染硬件推荐，不绕 RPC。
+- **`GUI ModelsTab` 接入 `HardwareSuggestionBanner`** — `Sources/MoxGUI/MainWindow.swift` 在 `appState.models.isEmpty` 时显示 banner，async-load 探测 → 显示 tier + 已装匹配 / Apple Silicon 推荐列表 / Intel Rosetta 提示。~70 行 SwiftUI。
+
+### Tests
+
+- **`ModelRegistryTests.evictsLRU` + `touchProtects`** 移除 `withKnownIssue { ... }` 包裹（v0.8.7 / v0.8.8 的承诺兑现），改为 `registerBatch` 驱动 setup 阶段，**严格断言 `evicted == ["b"]` / `["a"]`** 与 `entries` 集合 —— 不再有 actor scheduling flake。
+- **`ModelRegistryTests.registerBatchReturnsLastEviction`** 新增：直接覆盖 `registerBatch` 的合约（last-call eviction 列表 + 4-registration 100 MiB 场景的最终 state）。
+- **`Tests/MoxGUIClientTests/HardwareSuggestionTests.swift`** — 6 个测试覆盖 `current()` shape 不变量（recommendations 非空、notes 非空、tier 合法、installed-id 匹配正/反、Equatable round-trip）。
+- MoxCoreTests 在 v0.10.1 LRU 改造后：**175 / 175 pass，0 known issue**（v0.8.5 时代起的 3 个 `withKnownIssue` 全部清账）。
+- **全套 `swift test` 193 / 193 pass**（v0.10.1 + GUI helper 后；增量 6 例来自 `HardwareSuggestionTests`）。
+
+### Fixed
+
+- **`mox suggest` 文档注释截断** — v0.10.0 commit 时 patch 损坏，`handleSuggest` 的 doc comment 终止在 "...when" 半句子上。补完为 "Also wired as the fallback for `mox chat` (and `mox -m`) when called without a model id — see the dispatch case above."
+- **`mox suggest` 终端输出顺序错乱** — `tier notes` 之前打印到 stderr 在 recommendations 之后，但 stderr 是 line-flushed 而 stdout 是 line-buffered，TTY 上 notes 跑到 `Detected:` 之前。改为先 stderr 再 stdout，捕获输出顺序与逻辑顺序一致。
+
+### Moved
+
+- **`HardwareClassifier` + `DefaultModelSuggester` 从 `MoxCore` 迁到 `MoxShared`** — 实现见 v0.10.0 entry；本条只记录迁移动作。两个文件本身只 `import Foundation + Darwin`，对 `MoxCore` 零依赖；`MoxShared` 是 `MoxGUIClient` 唯一被允许依赖的 leaf target，迁过去后 GUI 可以直接用，无需绕 RPC 或拽 `MoxCore` 进 GUI target。**注意 CHANGELOG v0.10.0 那两条 `Sources/MoxCore/...` 路径已过时**——本文写作时已统一为 `Sources/MoxShared/...`。测试文件路径 `Tests/MoxCoreTests/HardwareClassifierTests.swift` / `DefaultModelSuggesterTests.swift` 保留（target 仍能 `@testable import MoxShared`），仅 import 从 `@testable import MoxCore` 改为 `@testable import MoxShared`。
+
+## v0.8.6 — `ModelRunner` 接 `ModelRegistry` + `/health` 加 cache budget (2026-09)
 
 ### Added
 

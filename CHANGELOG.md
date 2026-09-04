@@ -2,7 +2,24 @@
 
 All notable changes to mox are documented here. Versions follow semver;
 v0.x releases may include breaking protocol changes documented inline.
-## v0.8.6 — `ModelRunner` 接 `ModelRegistry` (2026-09)
+## v0.10.0 — `mox suggest` + 硬件感知 chat 兜底 (2026-09)
+
+### Added
+
+- **`Sources/MoxCore/HardwareClassifier.swift`** — `Sendable struct`，只读探测：`uname -m`（arm64 vs Intel）、`sysctl hw.memsize`（bytes）、`sysctl machdep.cpu.brand_string`（"Apple M4 Pro" → 解析为 `m1/m3/m4/m5/unknown`）。`parseChip` 检查顺序 m5→m4→m3→m1（避免 m5 被 m 截断）。零 I/O 零 actor，纯 Swift。
+- **`Sources/MoxCore/DefaultModelSuggester.swift`** — `Sendable struct` + 嵌套 `Suggestion { recommendedIDs, totalRAMGB, tier, notes }`。按 RAM 分四档：`< 16 GB` → toy (sub-2B)；`16-32 GB` → small (7-9B 4-bit)；`32-64 GB` → medium (14-27B 4-bit)；`64+ GB` → large (32-72B 4-bit)。Intel Mac 短路过 MLX 推荐，输出 Rosetta / 非 MLX 后端的 note（仍占 tier=.toy，避免静默失败）。
+- **`mox suggest`** — 新 CLI 子命令，打印 `Detected: <brand>, <N> GB RAM (<tier> tier)` + 有序推荐列表。如果推荐的第一项已 `mox pull` 过本地有，标 `(already installed)`；否则提示 `Run: mox pull <id>  then  mox run <id>`。
+- **`mox chat`（含 `mox -m`）无 model id 时不再报错** — 改为 fallback 到 `handleSuggest`，让用户看到硬件感知推荐后重跑 `mox chat <id>` 显式启动 REPL。理由：用户刚装好 mox 第一次敲 `mox chat` 时，"缺 model id" 错误没告诉他该选哪个；推荐比错误更友好。
+
+### Tests
+
+- **`Tests/MoxCoreTests/HardwareClassifierTests.swift`** — 9 个测试覆盖每个 `ChipGeneration` 分支（M1/M3/M4/M5/unknown）、`isAppleSilicon` 翻转、`totalMemoryBytes` round-trip、`brandString` 保留、零字节内存不崩。
+- **`Tests/MoxCoreTests/DefaultModelSuggesterTests.swift`** — 11 个测试覆盖四档 + 三个边界 (16/32/64 GB 准确落入上一档而非下一档) + Intel 短路径 + 零字节内存兜底 + 每个 tier 必有非空 `notes` + 推荐列表内部 id 唯一。
+
+### CLI 行为
+
+- `mox help` 增加 `suggest` 条目；`chat` 行加上 `omit id for a hardware-aware recommendation` 提示。
+
 
 ### Added
 

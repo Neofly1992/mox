@@ -231,20 +231,23 @@ OpenAI handler、Anthropic handler 都先调 `RequestPolicy.resolve`，得到 `R
 
 **不做**：thinking token 预算截断（max_thinking_tokens）—— 用户没要。
 
-### 9.4 硬件感知 default model
-
+### 9.4 硬件感知 default model ✅ v0.10.0 已交付 (2026-09)
 **动机**：MTPLX 按 M1/M2/M3/M4/M5 + 内存选推荐模型，32 GB 以下推荐 9B、64 GB+ 推荐 27B。
 
 **做法**：
-- `MoxCore.HardwareClassifier`：`uname -m` + `sysctl hw.optional.arm64` + `host_statistics64` 拿内存 + `sysctl machdep.cpu.brand_string` 解析 generation。
-- `MoxCore.DefaultModelSuggester`：按 (generation, totalRAM) → 推荐 model id + 内存预算 + 提示。
-- `mox -m` 不带参数时打印推荐 + 让用户确认，不强推。
+- `MoxCore.HardwareClassifier`：`uname -m` + `sysctl hw.memsize` + `sysctl machdep.cpu.brand_string`，解析 `m1/m3/m4/m5/unknown`。零 actor / 零 I/O / 纯值类型。
+- `MoxCore.DefaultModelSuggester`：按 `totalRAMGB` → `Tier { toy / small / medium / large }`，输出有序 `recommendedIDs: [String]` + `notes`。Intel 走 Rosetta 兜底。
+- `mox suggest` 子命令：打印 `Detected: <brand>, <N> GB RAM (<tier> tier)` + 有序推荐，第一项已装时标记 `(already installed)`，否则给 `mox pull <id>  then  mox run <id>` 提示。
+- `mox chat`（含 `mox -m`）无 model id 时改为 fallback 到 `handleSuggest` —— 用户第一次敲 `mox chat` 不再撞 "Model ID required" 错误，而是先看到硬件感知推荐，再显式 `mox chat <id>` 进 REPL。
 
 **验证**：
-- 32 GB Mac mini 跑 `mox -m` 推荐 9B + 提示内存紧。
-- 96 GB Mac Studio 推荐 27B + 提示可考虑 35B MoE。
+- 真机（Apple M4 16 GB）跑 `mox suggest` → 输出 `(small tier)` + Qwen2.5-7B / Llama-3.1-8B / Qwen2.5-3B 三项。
+- `HardwareClassifierTests` 9 例覆盖每代 chip + Intel 翻转 + 零字节兜底；`DefaultModelSuggesterTests` 11 例覆盖四档 + 三个 tier 边界 + Intel + 唯一性。
+- Intel 路径输出 "Intel Mac detected — MLX won't run" 而非 MLX 推荐（避免引导用户去 pull mlx-community）。
 
-**不做**：自己维护一份"verified model catalog"——MTPLX 闭源前提的产物，mox 不做商业 curated list。
+**不做**：自己维护一份"verified model catalog"——MTPLX 闭源前提的产物，mox 不做商业 curated list。`HardwareClassifier` 不做总速率 / memory pressure 探测（System 框架级别的内存压力对 MLX 模型预热时机有用，但 ROADMAP 没要求，留在 v1.0+）。
+
+**已知边界**：`HardwareClassifier` 只解析到 m5；m6 / 未来世代走 `.unknown` —— 不会 crash，但 RAM tier 仍按实测字节判断，所以推荐逻辑不会失真。
 
 ---
 

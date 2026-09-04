@@ -27,6 +27,8 @@ struct MoxCLI {
             try await handleRun(args: Array(args[2...]))
         case "delete":
             try await handleDelete(args: Array(args[2...]))
+        case "suggest":
+            await handleSuggest(args: Array(args[2...]))
         case "chat", "-m":
             try await handleChat(args: Array(args[2...]))
         case "ask":
@@ -56,8 +58,8 @@ struct MoxCLI {
           pull <model>     Download a model from HuggingFace or ModelScope
           list             List all locally installed models
           run <model>      Run a model as a local API server
-          chat <model>     Chat with a model (or use -m)
-          ask              One-shot prompt that emits OpenAI-style JSON
+          chat <model>     Chat with a model (or use -m); omit id for a hardware-aware recommendation
+          suggest          Print the hardware-aware default-model recommendation
           -m <prompt>      Send a single message to the model
           convert <dir>    Quantize a local HF/MLX model dir to MLX safetensors (v0.9)
           re-quantize <dir> Re-run quantization on an already-installed MLX model
@@ -370,8 +372,11 @@ struct MoxCLI {
         }
 
         guard let id = modelId else {
-            moxPrint("Error: Model ID required")
-            moxStderr("Usage: mox chat <model-id>")
+            // No model id → recommend one based on the host
+            // hardware instead of failing out. The user is the
+            // final authority; they can re-run with an explicit
+            // model id to start the REPL.
+            await handleSuggest(args: [])
             return
         }
 
@@ -390,7 +395,6 @@ struct MoxCLI {
 
         var messages: [ChatMessage] = []
 
-        // REPL loop. readLine returns nil on EOF (Ctrl+D / closed pipe) — exit silently.
         while true {
             moxPrint("> ", terminator: "")
             guard let line = readLine(strippingNewline: true) else {
@@ -646,6 +650,35 @@ struct MoxCLI {
         }
     }
 
+    /// `mox suggest` — print a hardware-aware default-model recommendation.
+    /// Also wired as the fallback for `mox chat` (and `mox -m`) when
+    static func handleSuggest(args: [String]) async {
+        let hardware = HardwareClassifier()
+        let suggestion = DefaultModelSuggester().suggest(for: hardware)
+        let installed: [String]
+        do {
+            installed = try await ModelManager.shared.listModels().map(\.id)
+        } catch {
+            installed = []
+        }
+        let installedMatch = suggestion.recommendedIDs.first(where: installed.contains)
+
+        moxPrint("Detected: \(hardware.brandString.isEmpty ? "unknown Mac" : hardware.brandString), \(suggestion.totalRAMGB) GB RAM (\(suggestion.tier.rawValue) tier)")
+        if !hardware.isAppleSilicon {
+            moxStderr(suggestion.notes)
+            return
+        }
+        if let installedMatch {
+            moxPrint("Recommended: \(installedMatch) (already installed)")
+        } else {
+            moxPrint("Recommended:")
+            for id in suggestion.recommendedIDs {
+                moxPrint("  \(id)")
+            }
+            moxPrint("Run: mox pull <id>  then  mox run <id>")
+        }
+        moxStderr(suggestion.notes)
+    }
     static func handleUpdate(args: [String]) async throws {
         guard let modelId = args.first else {
              moxPrint("Error: Model ID required")

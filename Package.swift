@@ -75,7 +75,19 @@ let package = Package(
                 "MoxShared",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
-            ]
+            ],
+            // mox uses `@main struct MoxCLI` but also has top-level
+            // constructs (private enum `AskError` was historically
+            // top-level, and Swift treats the module's other
+            // declarations as "top-level code" by default). The
+            // canonical fix is `-parse-as-library`, which tells the
+            // compiler to treat the file as a library entry point
+            // (only `@main` is the entry; everything else is just a
+            // declaration). Without it, the build emits the error
+            // "'main' attribute cannot be used in a module that
+            // contains top-level code" and the binary can't be
+            // produced.
+            swiftSettings: [.unsafeFlags(["-parse-as-library"])]
         ),
         .executableTarget(
             name: "MoxServerCLI",
@@ -106,5 +118,19 @@ let package = Package(
                 "MoxShared"
             ]
         ),
-     ]
+        .testTarget(
+            // Tests for the MoxCLI target's pure helpers. Currently
+            // limited to `Doctor` (the only pure-enough surface in
+            // the CLI to unit test without spawning a daemon). Tests
+            // for handlePull / handleChat stay out — those need an
+            // integration harness that doesn't exist yet.
+            name: "MoxCLITests",
+            dependencies: [
+                "MoxCLI",
+                .product(name: "Testing", package: "swift-testing"),
+                "MoxCore",
+                "MoxShared"
+            ]
+        ),
+    ]
 )

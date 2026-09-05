@@ -39,6 +39,8 @@ struct MoxCLI {
             try await handleRequantize(args: Array(args[2...]))
         case "debug":
             try await handleDebug(args: Array(args[2...]))
+        case "doctor":
+            await DoctorEntry.handle(Array(args[2...]))
         case "help", "--help", "-h":
             printHelp()
         case "version", "--version":
@@ -64,6 +66,7 @@ struct MoxCLI {
           convert <dir>    Quantize a local HF/MLX model dir to MLX safetensors (v0.9)
           re-quantize <dir> Re-run quantization on an already-installed MLX model
           delete <model>   Delete a locally installed model
+          doctor [--json]  Diagnose install / daemon / network; --json for machine-readable
           help             Show this help message
           version          Show version information
 
@@ -1077,15 +1080,15 @@ struct MoxCLI {
             try proc.run()
             proc.waitUntilExit()
         } catch {
-            moxPrint("Failed to run \(exe): \(error.localizedDescription)")
         }
+    }
+
+    /// `throw AskError(...)` works in `async throws` contexts.
+    /// Lives inside the @main struct so Swift's "no top-level
+    /// code with @main" check passes.
+    private enum AskError: Error {
+        case usage
+        case notFound
     }
 }
 
-// MARK: -
-
-/// `throw AskError(...)` works in `async throws` contexts.
-private enum AskError: Error {
-    case usage
-    case notFound
-}

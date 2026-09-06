@@ -143,6 +143,28 @@ with tempfile.TemporaryDirectory(prefix='mox-cli-') as cwd:
             if process.poll() is None:
                 process.kill(); process.wait()
             selector.close()
+    # Fill a pipe before handing it to the CLI; leave its read end open but unread.
+    # This deterministically exercises real pipe backpressure without depending on prose length.
+    for stream_name in ['stderr', 'stdout']:
+        read_fd, write_fd = os.pipe()
+        os.set_blocking(write_fd, False)
+        try:
+            while True: os.write(write_fd, b'x' * 4096)
+        except BlockingIOError:
+            pass
+        kwargs = {stream_name: write_fd, ('stdout' if stream_name == 'stderr' else 'stderr'): subprocess.PIPE}
+        started = time.monotonic()
+        process = subprocess.Popen(base + ['--prompt', 'Say hello.', '--max-tokens', '4', '--temperature', '0'], cwd=cwd, **kwargs)
+        try:
+            out, err = process.communicate(timeout=20)
+            expected = 0 if stream_name == 'stderr' else 1
+            assert process.returncode == expected, (stream_name, process.returncode, out, err)
+            if stream_name == 'stdout': assert b'slowConsumer' in err
+            results['full-' + stream_name + '-pipe'] = {'exit': process.returncode, 'seconds': time.monotonic() - started}
+        finally:
+            if process.poll() is None: process.kill(); process.wait()
+            os.close(read_fd); os.close(write_fd)
+
     offline = subprocess.run(['/usr/bin/sandbox-exec', '-p', '(version 1)(allow default)(deny network*)'] + base + ['--prompt', 'Say hello.', '--max-tokens', '4', '--temperature', '0'], capture_output=True, cwd=cwd, timeout=60)
     assert offline.returncode == 0 and offline.stdout.strip(), offline.stderr
     results['network-denied'] = offline.returncode

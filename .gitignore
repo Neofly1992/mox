@@ -7,3 +7,6 @@ xcuserdata/
 .env
 .env.*
 !.env.example
+
+# Swift/Metal test instrumentation
+*.profraw

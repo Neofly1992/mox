@@ -1,0 +1,250 @@
+import ArgumentParser
+import Darwin
+import Foundation
+import MoxCore
+import MoxDomain
+import MoxMLX
+
+@main struct Mox: AsyncParsableCommand {
+  static func main() async {
+    do {
+      var command = try await asyncParseAsRoot()
+      if var asynchronous = command as? any AsyncParsableCommand {
+        try await asynchronous.run()
+      } else {
+        try command.run()
+      }
+    } catch {
+      let code = exitCode(for: error).rawValue
+      if code == ExitCode.validationFailure.rawValue {
+        diagnostic(fullMessage(for: error))
+        Darwin.exit(2)
+      }
+      exit(withError: error)
+    }
+  }
+
+  static let configuration = CommandConfiguration(
+    commandName: "mox", abstract: "Local MLX text inference", subcommands: [Chat.self])
+}
+struct Chat: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    abstract: "Chat with a read-only local MLX model directory.")
+  @Option var modelPath: String
+  @Option var prompt: String?
+  @Option var maxTokens: Int = 2048
+  @Option var temperature: Float = 0.6
+  @Option var topP: Float = 1
+  mutating func run() async throws {
+    let stdoutFlags = fcntl(STDOUT_FILENO, F_GETFL)
+    let stderrFlags = fcntl(STDERR_FILENO, F_GETFL)
+    _ = fcntl(STDOUT_FILENO, F_SETFL, stdoutFlags | O_NONBLOCK)
+    _ = fcntl(STDERR_FILENO, F_SETFL, stderrFlags | O_NONBLOCK)
+    defer {
+      _ = fcntl(STDOUT_FILENO, F_SETFL, stdoutFlags)
+      _ = fcntl(STDERR_FILENO, F_SETFL, stderrFlags)
+    }
+    let sampling: Sampling
+    do { sampling = try Sampling(maxTokens: maxTokens, temperature: temperature, topP: topP) } catch
+    {
+      diagnostic(String(describing: error))
+      throw ExitCode(2)
+    }
+    guard prompt != nil || isatty(STDIN_FILENO) != 0 else {
+      diagnostic("invalidParameters: non-terminal stdin requires --prompt.")
+      throw ExitCode(2)
+    }
+    let runtime: RuntimeCoordinator
+    let model: LocalModel
+    do {
+      model = try LocalModel(path: modelPath)
+      let budget = try MLXBackend.recommendedBudget()
+      runtime = RuntimeCoordinator(
+        backend: MLXBackend(memoryLimit: budget), policy: RuntimePolicy(budgetBytes: budget),
+        availableMemory: { SystemMemory.availableBytes() })
+      diagnostic("model=\(model.id) budget_bytes=\(budget) weights_bytes=\(model.weightBytes)")
+    } catch {
+      diagnostic(String(describing: error))
+      throw ExitCode(1)
+    }
+    let driver = await ChatDriver(
+      runtime: runtime, model: model, sampling: sampling, oneShot: prompt != nil)
+    let status = await driver.run(prompt: prompt)
+    throw ExitCode(status)
+  }
+}
+func diagnostic(_ text: String) {
+  // Unified Logging is authoritative. Never block inference/signals on an unread stderr pipe.
+  let data = Data((text + "\n").utf8)
+  _ = data.withUnsafeBytes { Darwin.write(STDERR_FILENO, $0.baseAddress, $0.count) }
+}
+
+@MainActor final class ChatDriver {
+  let runtime: RuntimeCoordinator
+  let model: LocalModel
+  let sampling: Sampling
+  let oneShot: Bool
+  var active: GenerationHandle?
+  var exiting: Int32?
+  var interruptedBeforeHandle = false
+  var working = false
+  var sources: [DispatchSourceSignal] = []
+  var input: DispatchSourceRead?
+  var inputWaiter: CheckedContinuation<String?, Never>?
+  var inputBuffer = Data()
+  init(runtime: RuntimeCoordinator, model: LocalModel, sampling: Sampling, oneShot: Bool) {
+    self.runtime = runtime
+    self.model = model
+    self.sampling = sampling
+    self.oneShot = oneShot
+  }
+  func run(prompt: String?) async -> Int32 {
+    signal(SIGINT, SIG_IGN)
+    signal(SIGTERM, SIG_IGN)
+    signal(SIGPIPE, SIG_IGN)
+    for number in [SIGINT, SIGTERM] {
+      let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+      source.setEventHandler { [weak self] in Task { @MainActor in self?.received(number) } }
+      source.resume()
+      sources.append(source)
+    }
+    var session = ChatSession()
+    var result: Int32 = 0
+    repeat {
+      let text: String
+      if let prompt {
+        text = prompt
+      } else {
+        diagnostic("You> ")
+        guard let line = await readInput() else { break }
+        text = line
+      }
+      if exiting != nil { break }
+      working = true
+      interruptedBeforeHandle = false
+      do {
+        let request = try session.request(prompt: text, sampling: sampling)
+        let handle = try await runtime.generate(model: model, request: request)
+        active = handle
+        if interruptedBeforeHandle || exiting != nil { handle.cancel() }
+        var reply = ""
+        for await event in handle.events {
+          switch event.payload {
+          case .contentDelta(let delta):
+            try await writeOutput(delta, handle: handle)
+            reply += delta
+          case .phase(let phase): diagnostic("request=\(event.requestID) phase=\(phase)")
+          case .usage(let usage):
+            diagnostic(
+              "request=\(event.requestID) prompt_tokens=\(usage.promptTokens) output_tokens=\(usage.outputTokens) prefill_s=\(usage.prefillSeconds) decode_s=\(usage.decodeSeconds)"
+            )
+          case .finished(let reason):
+            diagnostic("request=\(event.requestID) finished=\(reason.rawValue)")
+            session.complete(prompt: text, reply: reply, reason: reason)
+          case .failed(let error):
+            diagnostic("request=\(event.requestID) \(error)")
+            result = 1
+          }
+        }
+        await handle.waitUntilStopped()
+        try await writeOutput("\n", handle: nil)
+      } catch {
+        active?.cancel()
+        await active?.waitUntilStopped()
+        diagnostic(String(describing: error))
+        result = 1
+      }
+      active = nil
+      working = false
+    } while !oneShot && exiting == nil
+    await runtime.shutdown()
+    input?.cancel()
+    sources.forEach { $0.cancel() }
+    return exiting ?? result
+  }
+  func received(_ number: Int32) {
+    if number == SIGTERM {
+      exiting = 143
+    } else if oneShot {
+      exiting = 130
+    } else if !working {
+      exiting = 0
+    }
+    if working {
+      interruptedBeforeHandle = true
+      active?.cancel()
+      diagnostic("Cancelling; waiting for backend to stop…")
+    }
+    if exiting != nil {
+      inputWaiter?.resume(returning: nil)
+      inputWaiter = nil
+      input?.cancel()
+    }
+  }
+  func readInput() async -> String? {
+    if exiting != nil { return nil }
+    if let newline = inputBuffer.firstIndex(of: 10) {
+      let line = String(decoding: inputBuffer[..<newline], as: UTF8.self)
+      inputBuffer.removeSubrange(...newline)
+      return line
+    }
+    return await withCheckedContinuation { continuation in
+      inputWaiter = continuation
+      let source = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: .main)
+      source.setEventHandler { [weak self] in Task { @MainActor in self?.readReady() } }
+      input = source
+      source.resume()
+    }
+  }
+  func readReady() {
+    guard inputWaiter != nil else { return }
+    var bytes = [UInt8](repeating: 0, count: 4096)
+    let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
+    if count <= 0 {
+      inputWaiter?.resume(returning: nil)
+      inputWaiter = nil
+      input?.cancel()
+      return
+    }
+    inputBuffer.append(contentsOf: bytes.prefix(count))
+    if inputBuffer.count > 1_048_576 {
+      diagnostic("Input exceeds 1 MiB.")
+      inputWaiter?.resume(returning: nil)
+      inputWaiter = nil
+      input?.cancel()
+      return
+    }
+    if let newline = inputBuffer.firstIndex(of: 10) {
+      let line = String(decoding: inputBuffer[..<newline], as: UTF8.self)
+      inputBuffer.removeSubrange(...newline)
+      inputWaiter?.resume(returning: line)
+      inputWaiter = nil
+      input?.cancel()
+    }
+  }
+}
+
+/// Nonblocking stdout with a bounded write deadline; main actor stays available to signals.
+func writeOutput(_ text: String, handle: GenerationHandle?) async throws {
+  let data = Data(text.utf8)
+  let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+  var offset = 0
+  while offset < data.count {
+    if handle?.isCancelled == true { return }
+    let count = data.withUnsafeBytes {
+      Darwin.write(STDOUT_FILENO, $0.baseAddress!.advanced(by: offset), data.count - offset)
+    }
+    if count > 0 {
+      offset += count
+      continue
+    }
+    if count < 0 && errno == EINTR { continue }
+    guard count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) else {
+      throw MoxError(.slowConsumer, "stdout closed or write failed.")
+    }
+    guard ContinuousClock.now < deadline else {
+      throw MoxError(.slowConsumer, "stdout write exceeded 5 seconds.")
+    }
+    try await Task.sleep(for: .milliseconds(10))
+  }
+}

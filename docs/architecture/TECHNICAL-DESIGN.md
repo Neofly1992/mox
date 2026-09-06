@@ -328,3 +328,20 @@ Swift Testing 测纯策略/服务；真实 HTTP server 测 framing/backpressure�
 - 仍需 G0/G2/G3 实验确认：完整 Xcode 的 SwiftData、Hummingbird 实际流式/取消行为、官方 MLX 结束等待与缓冲限制。实验不通过就针对证据调整适配路径，不靠文档承诺跳过。
 
 具体产品决策已足够，不需要用户继续指定类/协议。以上少量工程默认（双 listener、外部 API key、GPU 初始串行策略、macOS 15 下限）是本方案推荐，实施时按验证结果更新并记录理由。
+
+## 13. M1 实施核验（2026-09-06）
+
+本节细化 §6/§7 在 M1 的实际边界，不增加 M2 范围。
+
+- 锁定官方 `mlx-swift 0.31.6`、`mlx-swift-lm 3.31.4`；tokenizer 使用 Hugging Face `swift-transformers 1.3.3` 的本地 `AutoTokenizer.from(modelFolder:)`，用小适配器实现 MLX 的 TokenizerLoader/Tokenizer 协议。CLI 使用 Apple ArgumentParser 1.8.2。完整传递依赖 revision 以根目录 `Package.resolved` 为准。MLX 依赖要求 Swift 6.3，产品部署目标仍是 macOS 15；尚未在 macOS 15 真机测试。
+- LM 3.31.4 的 `Evaluate.swift` 中 `generateLoopTask` 仍创建无界 AsyncStream。M1 使用同文件官方 `generate(input:parameters:context:didGenerate: (Int) -> GenerateDisposition)`，没有自行实现 token 迭代、采样或 EOS。该入口已被上游标 deprecated；这是为满足有界输出所做的明确选择，升级时重新核验。回调直接写入 Core 有界队列；上游只保存至多 maxTokens 个 token ID，没有另一条异步文本队列；detokenizer 复用官方实现。官方同步循环及适配器返回前均调用 `Stream().synchronize()`。
+- GenerationHandle 仅有一个消费者，队列上限 128 个非终态事件、256 KiB 文本，另保留一个终态槽。溢出立即请求停止，实际 GPU 完成后发 `failed(slowConsumer)`；保留已有事件，不把丢 chunk 当成功。取消在同一锁下幂等化；句柄拥有任务，wait 等任务返回和 lease 回收。
+- Coordinator 显式 FIFO GPU 门闩覆盖 load/warmup/generate/unload，actor 可重入不等于 GPU 串行。加载任务与单个等待请求的取消隔离；同批共享加载失败，后续新批次可重试。每个 request ID 只有一个 lease；使用中卸载 busy，shutdown 先取消并等待请求和在途卸载。M1 所有驻留模型均未固定，无 pin 命令。
+- 本地引用做规范化、路径摘要 ID、config/tokenizer 存在性、safetensors 有界头/尺寸/分片索引校验；加载前检查资产大小/修改时间指纹。引用不写文件，不承诺防御其他进程并发改写，也不把该指纹当密码学来源证明。模型需要本地 chat template，禁止上游缺模板时的 stdout 降级提示和隐式串接。
+- M1 可估算的 dense attention 配置类型：qwen2/qwen3/llama/gemma/gemma2/gemma3_text/mistral/phi3；其他类型即使 factory 认识也明确拒绝，待有对应内存估算再扩展。当前真机证据仅覆盖 Qwen2.5 0.5B 4-bit，非全模型兼容声明。
+- 预算独立估计：驻留 weights=权重资产字节；加载额外峰值再预留一份 weights；KV 按层数×2×KV heads×head dim×4 bytes×token 预算；工作区根据 hidden/vocab/layers 和固定 128-token prefill 分块保守估计，并设 64 MiB 下限。未知/溢出维度拒绝。tokenized 输入上限 8192、原始文本安全上限 1 MiB，输入+max output 还必须符合模型 context；超限拒绝而不截断。
+- 静态总预算取物理内存 65% 与 Metal recommended working set 80% 的较小值；GPU 准入时再读取 macOS free+inactive pages，额外留 20% 余量，必要时淘汰空闲模型。估算不是内存硬隔离，其他进程可能在准入后增加占用。backend 在组合入口一次设置 MLX memory limit 和 64 MiB cache limit；Coordinator 才是业务资源权威。不修改 wired memory，也不运行跨请求 prefix cache。
+- CLI 的 stdout 采用非阻塞写入和 5 秒写入期限；SIGPIPE 转为诊断退出。stderr 为非阻塞、尽力写入，满管道允许丢诊断行，完整阶段事件使用 Unified Logging；不允许为了诊断阻塞 GPU 回收。正常回复只到 stdout。ArgumentParser 的默认参数退出码 64 在组合入口映射为规格要求的 2。
+- `scripts/build-m1.sh` 用完整 Xcode 编译 Metal，把官方资源库以 `mlx.metallib` 与可执行文件并置，同时携带资源 bundles；这是上游 device.cpp 明确支持的定位路径。`swift build/test` 单独不会编译 Metal；真实测试通过 `scripts/test-m1-real.sh` 放置该资源。开发机额外安装了 Apple Metal Toolchain 17F109，非产品运行时依赖。
+
+核验来源：[MLX 发布版](https://github.com/ml-explore/mlx-swift/releases/tag/0.31.6)、[LM 发布版](https://github.com/ml-explore/mlx-swift-lm/releases/tag/3.31.4)及对应锁定 checkout 源码。实际通过范围与复现证据见 [M1 验收报告](../acceptance/M1.md)。

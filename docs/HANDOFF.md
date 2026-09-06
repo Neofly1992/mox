@@ -6,10 +6,11 @@
 
 - 用户已确认按新架构重写，并授权完成保存旧状态、创建分支、替换旧工程三步；已完成。
 - 分支 `codex/rewrite`；旧实现快照 `845470a`；新基础提交 `c3b9e2d`。开始时用 git status/log 核实最新状态，不强制回退到这些提交。
-- M1 实现中：Domain/Core、官方 MLX adapter 与最小 CLI 已实现；15 项自动测试通过；全新 `.build/m1-tests` 中真实推理连续三次通过，最终 CLI 全场景通过。旧增量目录曾出现异常派发，已改为隔离测试构建并保留异常记录；验收报告正在整理；尚未人工验收。
-- 完整 Xcode 26.6 (17F113) 初始化通过。SwiftData 独立进程写入/重开通过；新骨架 swift build 通过。MLX 与 CLI Metal 资源现已真实验证；App 和对外协议仍不在 M1 范围。
-- 不再有“先修好旧工程”“先安装 Xcode”的前置任务。沙箱曾阻止 Swift 宏插件/缓存访问，沙箱外成功；不要误诊为工具链损坏。
-- 本任务起点 `f898817`；已有未提交工程原则文档完整保存为 `68368b1`。M1 主实现提交 `0ef7fec`；资产一致性修复 `298f289`，为 Core 最终被测版本；CLI 非阻塞 stdin、产物工程外搬迁和重复打包已于 2026-09-07 复测通过；不推送、合并或发布。固定依赖与实施边界见技术设计 §13、docs/DEPENDENCIES.md。
+- **M1 待人工验收**：本地只读模型加载、官方 MLX 流式生成、取消并等待、再次生成、多轮最小 CLI 已完成。15 项自动规则/状态测试通过；全新测试目录中真实推理连续三次通过；2026-09-07 最终 CLI 的 PTY、退出码、满管道、产物搬迁、Unicode 路径、禁网与模型不改写测试通过。
+- [M1 验收报告](acceptance/M1.md)提供逐要求证据、5 个人工操作场景、限制和失败修复记录；[机器证据](acceptance/M1-evidence.json)记录版本、模型、统计和产物哈希。独立审查未进行，用户尚未验收。
+- 本任务起点 `f898817`；原有 5 份工程原则文档完整保存为 `68368b1`。主实现 `0ef7fec`、资产修复 `298f289`、测试入口 `1734112`、最终代码/脚本 `cbe9660`；之后是验收文档提交。仅本地提交，未推送、合并或发布。
+- 完整 Xcode 26.6、Swift 6.3.3、Metal Toolchain 17F109 已就绪；Apple M4/16 GiB/macOS 26.6.2 实测。固定 MLX/LM 依赖与资源策略见技术设计 §13、[依赖说明](DEPENDENCIES.md)。macOS 15 部署目标尚无真机证据。
+- 旧 `.build` 增量产物曾出现模块/派发异常，详细证据在报告；测试脚本使用隔离的 `.build/m1-tests` 后连续通过。不要复用旧测试产物或重做旧 Xcode 阻塞排查。App、HTTP、下载与持久化未实施，M2 尚未开始。
 
 ## 2. 必须保留的方向
 
@@ -27,7 +28,7 @@ HF/ModelScope 和同协议自定义来源、镜像；精确 revision 安装与�
 
 ## 3. 阅读顺序与文档职责
 
-所有实现会话先遵循 [CONTRIBUTING](../CONTRIBUTING.md) 的入口、自测、出口和人工验收流程。规格/报告模板位于 `docs/templates/`；[发布计划](RELEASE-PLAN.md)、[M1 详细规格](milestones/M1.md)、M2–M4 概要已建立。M1 验收报告在最终出口时建立；其余阶段尚未实现。
+所有实现会话先遵循 [CONTRIBUTING](../CONTRIBUTING.md) 的入口、自测、出口和人工验收流程。规格/报告模板位于 `docs/templates/`；[发布计划](RELEASE-PLAN.md)、[M1 详细规格](milestones/M1.md)、M2–M4 概要已建立。[M1 验收报告](acceptance/M1.md)已建立；其余阶段尚未实现。
 
 1. [技术方案](architecture/TECHNICAL-DESIGN.md)：写代码前必读，模块边界、状态/协议/存储契约、G0–G7 验收。具体依赖版本仍需实施时核验锁定。
 2. [产品契约](../ARCHITECTURE-DRAFT.md)：理解功能与默认行为；产品问题查这里。
@@ -52,11 +53,17 @@ G0–G7 是技术验收维度，M1–M4/P1 是交付顺序；相关验证随新�
 
 ## 5. 下一步
 
-M1 继续完成最终出口：运行 `scripts/test-m1-real.sh`、`scripts/test-m1-cli.py`，记录真实慢消费者、日志和构建结果；创建 `docs/acceptance/M1.md`，更新本文件并提交。
+1. 用户按 [M1 验收报告](acceptance/M1.md)的 5 个场景试用；仅收到明确反馈后更新“已验收”。
+2. 可由独立会话审查 `f898817..cbe9660` 的代码及后续验收文档提交，重点核验资源所有权、取消、引用一致性和证据；不自动创建任务或子代理。
+3. 人工或审查发现问题则修复并针对性复测；M1 人工验收通过后才进入 M2。
 
-真实测试模型已在 `.build/test-models/qwen2.5-0.5b-4bit`，来源/revision/SHA256 见依赖文档。Metal Toolchain 17F109 已安装；可复现构建为 `scripts/build-m1.sh`，产物 `.build/m1/mox`。无需重新排查 Xcode。
+直接启动：
 
-尚未获得人工验收，不进入 M2。完成后另一个会话可按起止提交独立审查；此安排不自动启动子代理。
+```sh
+/Users/neo/Code/personal/mox/.build/m1/mox chat --model-path /Users/neo/Code/personal/mox/.build/test-models/qwen2.5-0.5b-4bit
+```
+
+模型的固定来源/revision/SHA256 见依赖文档；模型不提交到 Git。可复现构建为 `scripts/build-m1.sh`，真机测试为 `MOX_TEST_MODEL="$PWD/.build/test-models/qwen2.5-0.5b-4bit" scripts/test-m1-real.sh`。完整命令与诊断位置在报告中，无需查源码。
 
 ## 6. 交接维护
 

@@ -341,7 +341,7 @@ Swift Testing 测纯策略/服务；真实 HTTP server 测 framing/backpressure�
 - M1 可估算的 dense attention 配置类型：qwen2/qwen3/llama/gemma/gemma2/gemma3_text/mistral/phi3；其他类型即使 factory 认识也明确拒绝，待有对应内存估算再扩展。当前真机证据仅覆盖 Qwen2.5 0.5B 4-bit，非全模型兼容声明。
 - 预算独立估计：驻留 weights=权重资产字节；加载额外峰值再预留一份 weights；KV 按层数×2×KV heads×head dim×4 bytes×token 预算；工作区根据 hidden/vocab/layers 和固定 128-token prefill 分块保守估计，并设 64 MiB 下限。未知/溢出维度拒绝。tokenized 输入上限 8192、原始文本安全上限 1 MiB，输入+max output 还必须符合模型 context；超限拒绝而不截断。
 - 静态总预算取物理内存 65% 与 Metal recommended working set 80% 的较小值；GPU 准入时再读取 macOS free+inactive pages，额外留 20% 余量，必要时淘汰空闲模型。估算不是内存硬隔离，其他进程可能在准入后增加占用。backend 在组合入口一次设置 MLX memory limit 和 64 MiB cache limit；Coordinator 才是业务资源权威。不修改 wired memory，也不运行跨请求 prefix cache。
-- CLI 的 stdout 采用非阻塞写入和 5 秒写入期限；SIGPIPE 转为诊断退出。stderr 为非阻塞、尽力写入，满管道允许丢诊断行，完整阶段事件使用 Unified Logging；不允许为了诊断阻塞 GPU 回收。正常回复只到 stdout。ArgumentParser 的默认参数退出码 64 在组合入口映射为规格要求的 2。
+- CLI 的 stdin 使用非阻塞读与 DispatchSourceRead，迟到读就绪事件遇 EAGAIN 保留等待；stdout 采用非阻塞写入和 5 秒写入期限；SIGPIPE 转为诊断退出。stderr 为非阻塞、尽力写入，满管道允许丢诊断行，完整阶段事件使用 Unified Logging；不允许为了诊断阻塞 GPU 回收。正常回复只到 stdout。ArgumentParser 的默认参数退出码 64 在组合入口映射为规格要求的 2。
 - `scripts/build-m1.sh` 用完整 Xcode 编译 Metal，把官方资源库以 `mlx.metallib` 与可执行文件并置，同时携带资源 bundles；这是上游 device.cpp 明确支持的定位路径。`swift build/test` 单独不会编译 Metal；真实测试通过 `scripts/test-m1-real.sh` 放置该资源。开发机额外安装了 Apple Metal Toolchain 17F109，非产品运行时依赖。
 
 核验来源：[MLX 发布版](https://github.com/ml-explore/mlx-swift/releases/tag/0.31.6)、[LM 发布版](https://github.com/ml-explore/mlx-swift-lm/releases/tag/3.31.4)及对应锁定 checkout 源码。实际通过范围与复现证据见 [M1 验收报告](../acceptance/M1.md)。

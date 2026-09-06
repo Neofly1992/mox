@@ -281,19 +281,23 @@ autosave 不用于业务完成保证：安装状态、终态、配置等明确 s
 
 ## 10. GUI、分发与诊断
 
+2026-09-06 用户澄清：0.1 是本机原型验收，App 本地构建仍需完成；下述公开签名、公证、Homebrew 分发要求延后到 P1。Pi 后置；不要求 Codex 或 Responses。
+
 GUI feature state：Models、Downloads、Chat、ServiceConnection、Settings、Diagnostics；共享依赖由 App composition 注入。SwiftUI NavigationSplitView、Settings scene、MenuBarExtra、原生文件选择；仅系统集成缺口用 AppKit。初版基础 Markdown 可用系统 AttributedString 能力，复杂代码渲染后续按实际需要引库。
 
 服务连接状态与模型就绪状态分开：connecting/running/unavailable 不等于 unloaded/loading/warming/ready。无模型服务可以健康；指定模型 warmup 成功才 ready。重连恢复 snapshot，不自动重放 generation；聊天重试由用户触发。
 
 分发：Xcode 生成 arm64 `.app`，内置同发行版本 `mox` worker 及所有 MLX Metal/resource bundles。使用 bundle-relative 定位，不能依赖开发机 `.build` 或 PATH。独立 App 不要求用户安装 Node/Python/Homebrew。Homebrew formula 交付 CLI + service，cask 可分发 App。
 
-首版选择 Developer ID 签名、Hardened Runtime、公证的站外分发；不以 Mac App Store sandbox 为目标。理由是共享用户级服务、可配置模型目录与 Homebrew 共存；不额外申请管理员权限。GUI 拥有父子 worker 不等于系统 sandbox。最小系统、Keychain、外置卷、签名资源和干净账户首次启动都必须验证。[Apple 公证流程](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+公开分发阶段 P1 选择 Developer ID 签名、Hardened Runtime、公证的站外分发；不以 Mac App Store sandbox 为目标。理由是共享用户级服务、可配置模型目录与 Homebrew 共存；不额外申请管理员权限。GUI 拥有父子 worker 不等于系统 sandbox。最小系统、Keychain、外置卷、签名资源和干净账户首次启动都必须验证。[Apple 公证流程](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
 
 日志：一个 subsystem、按 storage/download/runtime/server/gui/process 分类，结构化记录 operationID/requestID/instanceID/artifactID。Logger + OSSignposter 记录排队、下载、load/warmup、prefill/decode、取消回收；模型输出统计从上游 info 来。默认不记录 prompt、tool arguments、token、认证和可泄露凭据的 URL。
 
 诊断导出由显式动作触发，包含版本/依赖/硬件/有效配置脱敏/任务状态/近期关联事件。Unified Logging 是主要 sink；为 GUI 日志页提供有界脱敏事件 ring 和 snapshot，磁盘持久诊断按受控导出实现，不承诺可从系统日志读取任意历史。服务与 GUI 重启后的问题由 OS 日志和持久任务终态辅助定位。
 
 ## 11. 验证门槛与重写阶段
+
+2026-09-06 更新：实际交付顺序以 [发布计划](../RELEASE-PLAN.md) 的 M1–M4 为准；下表是验证维度，不是要求重做一轮前置预研。Xcode/SwiftData 与新骨架已通过验证，后续 Metal、App 与 MLX 验证随实现进行。
 
 | 门槛 | 验证内容 | 完成标准 |
 | --- | --- | --- |
@@ -312,7 +316,9 @@ Swift Testing 测纯策略/服务；真实 HTTP server 测 framing/backpressure�
 
 初版每次基准记录硬件、OS、依赖 revision、模型 artifact、cold load、TTFT、prefill/decode tokens/s、峰值内存、取消至资源回收时间；相对基线回归需解释，不设置跨机型虚假的统一性能数字。没有测量就不声称优于竞品。
 
-## 12. 本轮核验结果与未完成实验
+## 12. 2026-09-05 历史核验结果
+
+以下为重写前研究记录，非当前阻塞。2026-09-06 完整 Xcode 26.6 与 SwiftData probe 已通过；最新进度见 HANDOFF。
 
 - 本地研究基线：Swift 6.3.3，arm64 macOS 26.6.2；active developer directory 为 `/Library/Developer/CommandLineTools`。
 - 本地 MLX 源码确认：ModelContainer.prepare/generate、Generation.info/toolCall、生成任务取消与同步结束；UserInput 已含 image/video。不能把这些能力标成“上游不存在”。

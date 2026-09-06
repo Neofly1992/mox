@@ -26,6 +26,12 @@ swift build
 
 ## 设计依据
 
+[0.1 发布计划](docs/RELEASE-PLAN.md) · [M1 可执行规格](docs/milestones/M1.md)
+
+**新会话续接先读 [HANDOFF](docs/HANDOFF.md)**，其中记录当前状态、阅读顺序和下一步。
+
+开发、自测和人工验收统一遵循 [CONTRIBUTING](CONTRIBUTING.md)。
+
 - [产品与行为契约](ARCHITECTURE-DRAFT.md)
 - [技术方案](docs/architecture/TECHNICAL-DESIGN.md)
 - [竞品与选型补充](docs/architecture/COMPETITOR-AND-SELECTION-REVIEW.md)

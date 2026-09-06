@@ -15,11 +15,11 @@ for bundle in "$products"/*.bundle; do
   ditto "$bundle" "$output/$(basename "$bundle")"
 done
 mkdir -p "$output/licenses"
-cp LICENSE "$output/licenses/Mox-LICENSE"
+install -m 644 LICENSE "$output/licenses/Mox-LICENSE"
 for dependency in .build/xcode/SourcePackages/checkouts/*; do
   for license in "$dependency"/LICENSE* "$dependency"/NOTICE*; do
     if [[ -f "$license" ]]; then
-      cp "$license" "$output/licenses/$(basename "$dependency")-$(basename "$license")"
+      install -m 644 "$license" "$output/licenses/$(basename "$dependency")-$(basename "$license")"
     fi
   done
 done

@@ -9,6 +9,7 @@ from pathlib import Path
 import pty
 import selectors
 import signal
+import shutil
 import subprocess
 import tempfile
 import termios
@@ -29,6 +30,11 @@ def fingerprint():
 before = fingerprint()
 results = {}
 with tempfile.TemporaryDirectory(prefix='mox-cli-') as cwd:
+    relocated = Path(cwd) / 'Mox 运行目录'
+    shutil.copytree(Path(binary).parent, relocated)
+    binary = str(relocated / Path(binary).name)
+    base = [binary, 'chat', '--model-path', str(model)]
+    results['relocated-artifact'] = True
     for name, extra, expected in [
         ('invalid-tokens', ['--prompt', 'x', '--max-tokens', '0'], 2),
         ('nan-temperature', ['--prompt', 'x', '--temperature', 'nan'], 2),

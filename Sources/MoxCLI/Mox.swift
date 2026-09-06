@@ -36,11 +36,14 @@ struct Chat: AsyncParsableCommand {
   @Option var temperature: Float = 0.6
   @Option var topP: Float = 1
   mutating func run() async throws {
+    let stdinFlags = fcntl(STDIN_FILENO, F_GETFL)
     let stdoutFlags = fcntl(STDOUT_FILENO, F_GETFL)
     let stderrFlags = fcntl(STDERR_FILENO, F_GETFL)
+    _ = fcntl(STDIN_FILENO, F_SETFL, stdinFlags | O_NONBLOCK)
     _ = fcntl(STDOUT_FILENO, F_SETFL, stdoutFlags | O_NONBLOCK)
     _ = fcntl(STDERR_FILENO, F_SETFL, stderrFlags | O_NONBLOCK)
     defer {
+      _ = fcntl(STDIN_FILENO, F_SETFL, stdinFlags)
       _ = fcntl(STDOUT_FILENO, F_SETFL, stdoutFlags)
       _ = fcntl(STDERR_FILENO, F_SETFL, stderrFlags)
     }
@@ -200,6 +203,7 @@ func diagnostic(_ text: String) {
     guard inputWaiter != nil else { return }
     var bytes = [UInt8](repeating: 0, count: 4096)
     let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
+    if count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) { return }
     if count <= 0 {
       inputWaiter?.resume(returning: nil)
       inputWaiter = nil

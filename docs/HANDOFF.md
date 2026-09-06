@@ -13,6 +13,8 @@
 
 ## 2. 必须保留的方向
 
+必读 ARCHITECTURE-DRAFT 第 0 节的集中工程原则；CONTRIBUTING 已明确规格审阅分工与独立阶段审查建议。用户无需逐行看技术规格，实质产品/架构取舍应单独说明。
+
 Apple Silicon macOS 专用；优先 Apple 原生和成熟社区方案；复用官方 MLX。没有已发布兼容性负担，允许重新设计，不能因旧实现方便而保留错误边界。
 
 独立 .app 无需 brew/Python 即可使用；Homebrew 只是分发和可选服务托管。rootless；GUI 自己启动的 worker 与既有前台/brew 服务有明确所有权；不重复启动或误停外部服务。

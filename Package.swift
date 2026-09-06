@@ -132,5 +132,19 @@ let package = Package(
                 "MoxShared"
             ]
         ),
+        .testTarget(
+            // Unit tests for the MoxServer router / JSON response
+            // helpers. Integration tests for live endpoints (model
+            // load, chat) need a daemon harness that doesn't exist
+            // yet — those land alongside the daemon harness in a
+            // later release.
+            name: "MoxServerTests",
+            dependencies: [
+                "MoxServer",
+                "MoxCore",
+                "MoxShared",
+                .product(name: "Testing", package: "swift-testing")
+            ]
+        ),
     ]
 )

@@ -236,6 +236,10 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
             handleEmbeddings(channel: channel, body: body)
         case .anthropicMessages:
             handleAnthropicMessages(channel: channel, body: body)
+        case .loadModel(let id):
+            handleLoadModel(channel: channel, modelId: id)
+        case .unloadModel(let id):
+            handleUnloadModel(channel: channel, modelId: id)
         case .notFound:
             JSONResponse.write(
                 OpenAIErrorPayload(error: OpenAIErrorBody(
@@ -273,6 +277,77 @@ final class MoxHTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unc
                 channel.eventLoop.execute {
                     JSONResponse.writeError(error, kind: .openAI, on: channel)
                 }
+            }
+        }
+    }
+
+    /// v0.11 P1.2 — `POST /v1/models/<id>/load`. Pre-load a model
+    /// into the runner's resident set so the next chat request
+    /// doesn't pay cold-start cost. Idempotent (re-loading is a
+    /// refresh, not a duplicate). Returns 404 if the id isn't a
+    /// locally installed model; returns 200 with the load summary
+    /// on success.
+    private func handleLoadModel(channel: Channel, modelId: String) {
+        Task {
+            do {
+                let config = (try? await ConfigManager.shared.load()) ?? AppConfig()
+                let loaded = try await ModelRunner.shared.loadModel(id: modelId, config: config)
+                channel.eventLoop.execute {
+                    JSONResponse.write(
+                        ModelLoadResponse(
+                            id: loaded.id,
+                            loaded: true,
+                            loadedAt: loaded.loadedAt,
+                            family: loaded.modelFamily
+                        ),
+                        on: channel
+                    )
+                }
+            } catch let error as ModelError {
+                switch error {
+                case .notFound:
+                    let modelIdCopy = modelId
+                    channel.eventLoop.execute {
+                        JSONResponse.write(
+                            OpenAIErrorPayload(error: OpenAIErrorBody(
+                                message: "Model '\(modelIdCopy)' not found. Run `mox pull \(modelIdCopy)` first.",
+                                type: "invalid_request_error",
+                                code: "model_not_found"
+                            )),
+                            status: .notFound,
+                            on: channel
+                        )
+                    }
+                default:
+                    channel.eventLoop.execute {
+                        JSONResponse.writeError(error, kind: .openAI, on: channel)
+                    }
+                }
+            } catch {
+                channel.eventLoop.execute {
+                    JSONResponse.writeError(error, kind: .openAI, on: channel)
+                }
+            }
+        }
+    }
+
+    /// v0.11 P1.2 — `POST /v1/models/<id>/unload`. Force-evict a
+    /// resident model (freeing VRAM). Returns 200 even if the id
+    /// wasn't currently loaded — unload is idempotent by design
+    /// (matches `ModelRunner.unloadModel` semantics).
+    private func handleUnloadModel(channel: Channel, modelId: String) {
+        Task {
+            await ModelRunner.shared.unloadModel(id: modelId)
+            channel.eventLoop.execute {
+                JSONResponse.write(
+                    ModelLoadResponse(
+                        id: modelId,
+                        loaded: false,
+                        loadedAt: Date(),
+                        family: nil
+                    ),
+                    on: channel
+                )
             }
         }
     }
@@ -1119,6 +1194,16 @@ private struct ModelItem: Encodable {
 private struct ModelListResponse: Encodable {
     let object: String
     let data: [ModelItem]
+}
+
+/// v0.11 P1.2 — response shape for `POST /v1/models/<id>/load|unload`.
+/// `loaded: true` after a successful load; `loaded: false` after an
+/// unload (matches `ModelRunner.unloadModel`'s idempotent semantics).
+private struct ModelLoadResponse: Encodable {
+    let id: String
+    let loaded: Bool
+    let loadedAt: Date
+    let family: String?
 }
 
 

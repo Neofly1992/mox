@@ -17,6 +17,8 @@ enum HandlerKind: Sendable {
     case legacyCompletions
     case embeddings
     case anthropicMessages
+    case loadModel(id: String)
+    case unloadModel(id: String)
     case notFound
 }
 
@@ -34,22 +36,69 @@ enum HTTPRouter {
         HTTPRoute(method: .post, path: "/v1/completions",      kind: .legacyCompletions),
         HTTPRoute(method: .post, path: "/v1/embeddings",       kind: .embeddings),
         HTTPRoute(method: .post, path: "/v1/messages",         kind: .anthropicMessages),
+        // v0.11 P1.2 — model load/unload. Path-param routes use a
+        // synthetic kind (`{ id: String }`); the dispatch in
+        // `Server.swift` switches on those kinds and routes the id
+        // to the right handler. We don't try to encode the path
+        // template in `HTTPRoute.path` because exact-match lookup
+        // can't extract `{id}`.
+        HTTPRoute(method: .post, path: "/v1/models/__id__/load", kind: .loadModel(id: "__id__")),
+        HTTPRoute(method: .post, path: "/v1/models/__id__/unload", kind: .unloadModel(id: "__id__")),
     ]
 
+
     static func route(method: String, path: String) -> HandlerKind {
-        for route in routes where route.method.rawValue == method && route.path == path {
-            return route.kind
+        let dbg = ProcessInfo.processInfo.environment["MOX_DEBUG_ROUTER"] != nil
+        if dbg { print("[router] method=\(method) path=\(path)") }
+        for route in routes where route.method.rawValue == method {
+            // Path-param routes use `__id__` as a placeholder. The
+            // `/v1/models/__id__/load` template matches any
+            // `/v1/models/<id>/load` URI; we extract the id here
+            // and surface it on the HandlerKind so the dispatch
+            // in `Server.swift` can route by it.
+            if let kind = matchPathParam(route: route, requestPath: path) {
+                if dbg { print("[router] matched: \(kind)") }
+                return kind
+            }
         }
         return .notFound
+    }
+
+    /// Returns a HandlerKind (with the captured id baked in) if
+    /// `route` is a path-param template and `requestPath` matches.
+    /// Returns nil if no match (caller falls through to the next
+    /// route, or to `.notFound`).
+    private static func matchPathParam(route: HTTPRoute, requestPath: String) -> HandlerKind? {
+        let dbg = ProcessInfo.processInfo.environment["MOX_DEBUG_ROUTER"] != nil
+        if dbg { print("[router.matchPathParam] kind=\(route.kind)") }
+        switch route.kind {
+        case .loadModel(let id) where id == "__id__":
+            // Template: /v1/models/__id__/load
+            let prefix = "/v1/models/"
+            let suffix = "/load"
+            guard requestPath.hasPrefix(prefix), requestPath.hasSuffix(suffix) else { return nil }
+            let modelId = String(requestPath.dropFirst(prefix.count).dropLast(suffix.count))
+            guard !modelId.isEmpty, !modelId.contains("/") else { return nil }
+            return .loadModel(id: modelId)
+        case .unloadModel(let id) where id == "__id__":
+            let prefix = "/v1/models/"
+            let suffix = "/unload"
+            guard requestPath.hasPrefix(prefix), requestPath.hasSuffix(suffix) else { return nil }
+            let modelId = String(requestPath.dropFirst(prefix.count).dropLast(suffix.count))
+            guard !modelId.isEmpty, !modelId.contains("/") else { return nil }
+            return .unloadModel(id: modelId)
+        default:
+            // Exact-match routes — fast path.
+            if route.path == requestPath { return route.kind }
+            return nil
+        }
     }
 }
 
 // MARK: - JSON response
 
 /// v0.8 — single JSON response writer that handles both happy-path
-/// `Encodable` payloads and structured errors. Replaces the previous
-/// `respond(on:)` + `respondAnthropicJSON(on:)` pair (90% duplicated)
-/// + `respondError(on:)` + `respondAnthropicError(on:)` quartet.
+/// `Encodable` payloads and structured errors.
 enum JSONResponse {
     static func write<Payload: Encodable>(
         _ payload: Payload,

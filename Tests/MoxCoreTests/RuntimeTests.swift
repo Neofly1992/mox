@@ -349,3 +349,38 @@ func runtime(_ backend: ProbeBackend, queue: Int = 8, timeout: Duration = .secon
     to: model.directory.appendingPathComponent("model.safetensors"))
   #expect(throws: MoxError.self) { try LocalModel(path: model.directory.path) }
 }
+
+@Test func residentReferenceCannotSilentlySwitchAssets() async throws {
+  let model = try fixture()
+  defer { try? FileManager.default.removeItem(at: model.directory) }
+  let core = runtime(ProbeBackend(loadDelay: .zero))
+  _ = await collect(try await core.generate(model: model, request: request()))
+  try Data("{\"changed\":true}".utf8).write(
+    to: model.directory.appendingPathComponent("tokenizer_config.json"))
+  let replacement = try LocalModel(path: model.directory.path)
+  do {
+    _ = try await core.generate(model: replacement, request: request())
+    Issue.record("Changed reference reused resident weights")
+  } catch let error as MoxError { #expect(error.code == .invalidModel) }
+  try await core.unload(modelID: model.id)
+  _ = await collect(try await core.generate(model: replacement, request: request()))
+  await core.shutdown()
+}
+
+@Test func assetsChangedWhileLoadingRollBack() async throws {
+  let model = try fixture()
+  defer { try? FileManager.default.removeItem(at: model.directory) }
+  let core = runtime(ProbeBackend(loadDelay: .milliseconds(80)))
+  let handle = try await core.generate(model: model, request: request())
+  try await Task.sleep(for: .milliseconds(20))
+  try Data("{\"changed\":true}".utf8).write(
+    to: model.directory.appendingPathComponent("tokenizer_config.json"))
+  let events = await collect(handle)
+  if case .failed(let error) = events.last?.payload {
+    #expect(error.code == .invalidModel)
+  } else {
+    Issue.record("Changed loading assets were admitted")
+  }
+  #expect(await core.snapshot().reservedBytes == 0)
+  #expect(await core.snapshot().residentModels == 0)
+}

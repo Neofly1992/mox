@@ -37,6 +37,13 @@ public struct LocalModel: Sendable, Hashable {
       FileManager.default.isReadableFile(
         atPath: directory.appendingPathComponent("tokenizer.json").path)
     else { throw MoxError(.invalidModel, "Missing tokenizer.json.") }
+    guard
+      let tokenizerSize = try? directory.appendingPathComponent("tokenizer.json").resourceValues(
+        forKeys: [.fileSizeKey]).fileSize,
+      tokenizerSize <= 64 * 1024 * 1024
+    else {
+      throw MoxError(.resourceLimit, "tokenizer.json exceeds the 64 MiB asset metadata budget.")
+    }
     // These dense attention layouts have a defensible KV/working-space estimate.
     // Other factory architectures need their own estimator before admission.
     guard let type = config["model_type"] as? String,

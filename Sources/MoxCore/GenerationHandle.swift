@@ -55,7 +55,10 @@ public final class GenerationHandle: Sendable {
     lock.withLock {
       guard !state.terminal, !state.cancelled, !payload.isTerminal else { return false }
       let size = Self.size(payload)
-      if state.waiter == nil && (state.events.count >= capacity || state.bytes + size > byteLimit) {
+      if size > byteLimit
+        || (state.waiter == nil
+          && (state.events.count >= capacity || state.bytes + size > byteLimit))
+      {
         state.cancelAt = .now
         state.overflow = true
         state.cancelled = true

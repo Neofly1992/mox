@@ -82,6 +82,7 @@ public actor RuntimeCoordinator {
       throw MoxError(.invalidParameters, "Request ID is already active.")
     }
     try model.validateUnchanged()
+    try validateResidentReference(model)
     // Reserve a context-bounded KV allowance; exact token count is checked by the processor.
     let tokens = min(model.contextSize, 8192 + request.sampling.maxTokens)
     let transient = model.kvBytesPerToken * tokens + model.workspaceBytes
@@ -112,6 +113,7 @@ public actor RuntimeCoordinator {
       acquired = true
       try Task.checkCancellation()
       try model.validateUnchanged()
+      try validateResidentReference(model)
       if let load = loads[model.id], slots[model.id] == nil { _ = try await load.value }
       let needsLoad = slots[model.id] == nil
       let required = transient + (needsLoad ? model.weightBytes * 2 : 0)
@@ -138,6 +140,12 @@ public actor RuntimeCoordinator {
           let loader = Task.detached { [backend] in try await backend.load(model) }
           loads[model.id] = loader
           let loaded = try await loader.value
+          do { try model.validateUnchanged() } catch {
+            await loaded.unload()
+            let changed = MoxError(.invalidModel, "Referenced assets changed during loading.")
+            loads[model.id] = Task { throw changed }
+            throw changed
+          }
           tick += 1
           slots[model.id] = Slot(model: model, loaded: loaded, tick: tick)
           loads.removeValue(forKey: model.id)
@@ -189,6 +197,13 @@ public actor RuntimeCoordinator {
       logger.info(
         "request=\(request.id.uuidString, privacy: .public) phase=cancel cancel_wait_seconds=\(Self.seconds(elapsed))"
       )
+    }
+  }
+  private func validateResidentReference(_ model: LocalModel) throws {
+    if let slot = slots[model.id], slot.model != model {
+      throw MoxError(
+        .invalidModel,
+        "The resident model's directory changed; unload it before opening a new reference.")
     }
   }
   private func acquire(_ id: UUID) async throws {

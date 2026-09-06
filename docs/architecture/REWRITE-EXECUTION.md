@@ -19,3 +19,12 @@
 4. 引入 Hummingbird 与 Client/Bootstrap，验证三种服务所有权及流式协议；随后下载、GUI 和对外 agent 协议。
 
 验收以 TECHNICAL-DESIGN 的 G0–G7 和 COMPETITOR-AND-SELECTION-REVIEW 的能力矩阵为准。当前未宣称新实现或 G0 已完成。
+
+## 2026-09-06 工程切换已完成
+
+- 重写前完整快照提交：`845470a`，含未提交源码、测试和设计。因原环境没有 Git 身份，沿用既有提交的 `neo <neo@local>`，仅对该命令生效。
+- 当前分支：`codex/rewrite`。分支在快照提交前已创建，因此快照在此分支历史中；原分支没有被移动。
+- 删除旧 Sources/Tests、旧 GUI smoke 脚本、依赖锁定文件及过期 DESIGN/ROADMAP/CHANGELOG/CONTRIBUTING；旧内容可从快照查看。
+- 新 SwiftPM 包仅建立 Domain/Core 边界，Swift 6、macOS 15，无第三方依赖；其余模块随功能加入。当前没有 CLI/GUI 或推理实现。
+- 独立 scratch path 构建通过；`git diff --check` 通过。未搬运旧测试，当前不宣称功能测试通过。
+- 上文环境阻塞和待切换条目为过程记录，已被本条及 Xcode 验证结果更新。

@@ -2,7 +2,6 @@
   "schema": 1,
   "final_source_commit": "9df437bcb390b5079ac6107ddb5458be7eaa6210",
   "verification_dates": [
-    "2026-09-06",
     "2026-09-07"
   ],
   "environment": {
@@ -19,30 +18,19 @@
     "weights_bytes": 278064920,
     "sha256": "ddffab9cbc7bf6dde941c6724841eeca8981fcfa81ca20ff8efff1396326d153"
   },
-  "core_tests": {
-    "passed": 15,
-    "date": "2026-09-06",
-    "code_commit": "298f289",
-    "unchanged_in_final_source": true
-  },
   "real_core_tests": {
-    "passed_independent_process_runs": 3,
-    "date": "2026-09-06",
+    "passed_process_runs": 1,
+    "date": "2026-09-07",
     "scratch_path": ".build/m1-tests",
-    "cases": [
-      "load/warmup",
-      "stream/stop",
-      "cancel-and-wait",
-      "generate again",
-      "length",
-      "context rejection",
-      "slow consumer failure",
-      "shutdown releases reservation"
+    "coverage": [
+      "combining marks, emoji ZWJ and regional indicators",
+      "incomplete UTF-8 and final flush",
+      "reject revised emitted prefix",
+      "real local tokenizer scalar equality",
+      "real load, stream, cancel, regenerate, overflow, shutdown",
+      "PTY oversized input exits 1; ordinary EOF exits 0"
     ],
-    "observed_cancel_wait_seconds": [
-      0.015114791
-    ],
-    "note": "Samples retained from actual tool output; not a guaranteed latency. Earlier legacy incremental directory SIGSEGV is documented in M1.md."
+    "observed_cancel_wait_seconds": 0.012634291
   },
   "cli": {
     "relocated-artifact": true,
@@ -51,40 +39,23 @@
     "unknown-option": 2,
     "non-tty-input": 2,
     "missing-model": 1,
-    "interactive-cancel-wait-seconds": 0.008725458000014896,
+    "interactive-cancel-wait-seconds": 0.008445749999737018,
     "SIGINT": 130,
     "SIGTERM": 143,
     "full-stderr-pipe": {
       "exit": 0,
-      "seconds": 0.41603595800000903
+      "seconds": 0.41330491700000493
     },
     "full-stdout-pipe": {
       "exit": 1,
-      "seconds": 5.438412958000015
+      "seconds": 5.435503000000153
+    },
+    "oversized-terminal-input": {
+      "bytes": 1048577,
+      "exit": 1
     },
     "network-denied": 0,
     "model-assets-unchanged": true
-  },
-  "cli_performance": {
-    "prompt_tokens": 35,
-    "output_tokens": 48,
-    "prefill_seconds": 0.02636110782623291,
-    "decode_seconds": 0.20283794403076172,
-    "elapsed_seconds": 1.1389330000000086,
-    "first_output_seconds": 0.9143477500000472,
-    "stdout_reads": 49,
-    "date": "2026-09-07",
-    "cold_load_note": "New process; filesystem caches were not flushed."
-  },
-  "memory_sample": {
-    "date": "2026-09-06",
-    "source_commit": "298f289",
-    "command": "/usr/bin/time -l .build/m1/mox chat --model-path .build/test-models/qwen2.5-0.5b-4bit --prompt \"Briefly explain the ocean.\" --max-tokens 48 --temperature 0",
-    "wall_seconds": 1.22,
-    "peak_rss_bytes": 413663232,
-    "peak_footprint_bytes": 441648208,
-    "note": "Measured amid developer workload. RSS/footprint and MLX peak are different metrics, not additive.",
-    "observed_peak_mlx_bytes": 339919132
   },
   "artifacts": {
     "mox": "4d3d0f9703dd5e1ed0c0555389dab5c2696b4ae61c629e357660e9c20ac7e669",
@@ -96,45 +67,13 @@
     "user_acceptance": "pending",
     "same_session_review": "two P2 findings fixed and retested; independent review not performed"
   },
-  "previous_source_commit": "cbe9660352ae16ce1b59949d8a397e3458afc50e",
-  "review_fix_verification": {
+  "rule_tests": {
+    "passed": 18,
     "date": "2026-09-07",
-    "source_commit": "9df437bcb390b5079ac6107ddb5458be7eaa6210",
-    "rule_tests_passed": 18,
-    "real_inference_runs_passed": 1,
-    "real_cancel_wait_seconds": 0.012634291,
-    "coverage": [
-      "combining marks, emoji ZWJ and regional indicators",
-      "incomplete UTF-8 and final flush",
-      "reject revised emitted prefix",
-      "real local tokenizer scalar equality",
-      "real load, stream, cancel, regenerate, overflow, shutdown",
-      "PTY oversized input exits 1; ordinary EOF exits 0"
-    ],
-    "cli": {
-      "relocated-artifact": true,
-      "invalid-tokens": 2,
-      "nan-temperature": 2,
-      "unknown-option": 2,
-      "non-tty-input": 2,
-      "missing-model": 1,
-      "interactive-cancel-wait-seconds": 0.008445749999737018,
-      "SIGINT": 130,
-      "SIGTERM": 143,
-      "full-stderr-pipe": {
-        "exit": 0,
-        "seconds": 0.41330491700000493
-      },
-      "full-stdout-pipe": {
-        "exit": 1,
-        "seconds": 5.435503000000153
-      },
-      "oversized-terminal-input": {
-        "bytes": 1048577,
-        "exit": 1
-      },
-      "network-denied": 0,
-      "model-assets-unchanged": true
-    }
-  }
+    "source_commit": "9df437bcb390b5079ac6107ddb5458be7eaa6210"
+  },
+  "unmeasured_benchmarks": [
+    "cold load",
+    "peak RSS"
+  ]
 }

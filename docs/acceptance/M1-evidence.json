@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "final_source_commit": "cbe9660352ae16ce1b59949d8a397e3458afc50e",
+  "final_source_commit": "9df437bcb390b5079ac6107ddb5458be7eaa6210",
   "verification_dates": [
     "2026-09-06",
     "2026-09-07"
@@ -87,12 +87,54 @@
     "observed_peak_mlx_bytes": 339919132
   },
   "artifacts": {
-    "mox": "1bc9cf68534f9cb129ec95352ad394aa57882c9022d3a17941b8d2dcf9974673",
+    "mox": "4d3d0f9703dd5e1ed0c0555389dab5c2696b4ae61c629e357660e9c20ac7e669",
     "mlx.metallib": "24d4cfcd3ca8b15ead691e46219f35adabbea64c9f8de4eae9bf293fd8d5eb7b"
   },
   "review": {
     "implementer_self_test": "passed",
     "independent_review": "not performed",
-    "user_acceptance": "pending"
+    "user_acceptance": "pending",
+    "same_session_review": "two P2 findings fixed and retested; independent review not performed"
+  },
+  "previous_source_commit": "cbe9660352ae16ce1b59949d8a397e3458afc50e",
+  "review_fix_verification": {
+    "date": "2026-09-07",
+    "source_commit": "9df437bcb390b5079ac6107ddb5458be7eaa6210",
+    "rule_tests_passed": 18,
+    "real_inference_runs_passed": 1,
+    "real_cancel_wait_seconds": 0.012634291,
+    "coverage": [
+      "combining marks, emoji ZWJ and regional indicators",
+      "incomplete UTF-8 and final flush",
+      "reject revised emitted prefix",
+      "real local tokenizer scalar equality",
+      "real load, stream, cancel, regenerate, overflow, shutdown",
+      "PTY oversized input exits 1; ordinary EOF exits 0"
+    ],
+    "cli": {
+      "relocated-artifact": true,
+      "invalid-tokens": 2,
+      "nan-temperature": 2,
+      "unknown-option": 2,
+      "non-tty-input": 2,
+      "missing-model": 1,
+      "interactive-cancel-wait-seconds": 0.008445749999737018,
+      "SIGINT": 130,
+      "SIGTERM": 143,
+      "full-stderr-pipe": {
+        "exit": 0,
+        "seconds": 0.41330491700000493
+      },
+      "full-stdout-pipe": {
+        "exit": 1,
+        "seconds": 5.435503000000153
+      },
+      "oversized-terminal-input": {
+        "bytes": 1048577,
+        "exit": 1
+      },
+      "network-denied": 0,
+      "model-assets-unchanged": true
+    }
   }
 }

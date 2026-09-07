@@ -93,7 +93,7 @@ func diagnostic(_ text: String) {
   var working = false
   var sources: [DispatchSourceSignal] = []
   var input: DispatchSourceRead?
-  var inputWaiter: CheckedContinuation<String?, Never>?
+  var inputWaiter: CheckedContinuation<String?, Error>?
   var inputBuffer = Data()
   init(runtime: RuntimeCoordinator, model: LocalModel, sampling: Sampling, oneShot: Bool) {
     self.runtime = runtime
@@ -119,8 +119,14 @@ func diagnostic(_ text: String) {
         text = prompt
       } else {
         diagnostic("You> ")
-        guard let line = await readInput() else { break }
-        text = line
+        do {
+          guard let line = try await readInput() else { break }
+          text = line
+        } catch {
+          diagnostic(String(describing: error))
+          result = 1
+          break
+        }
       }
       if exiting != nil { break }
       working = true
@@ -184,14 +190,14 @@ func diagnostic(_ text: String) {
       input?.cancel()
     }
   }
-  func readInput() async -> String? {
+  func readInput() async throws -> String? {
     if exiting != nil { return nil }
     if let newline = inputBuffer.firstIndex(of: 10) {
       let line = String(decoding: inputBuffer[..<newline], as: UTF8.self)
       inputBuffer.removeSubrange(...newline)
       return line
     }
-    return await withCheckedContinuation { continuation in
+    return try await withCheckedThrowingContinuation { continuation in
       inputWaiter = continuation
       let source = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: .main)
       source.setEventHandler { [weak self] in Task { @MainActor in self?.readReady() } }
@@ -204,7 +210,13 @@ func diagnostic(_ text: String) {
     var bytes = [UInt8](repeating: 0, count: 4096)
     let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
     if count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) { return }
-    if count <= 0 {
+    if count < 0 {
+      inputWaiter?.resume(throwing: MoxError(.generationFailed, "Terminal input read failed."))
+      inputWaiter = nil
+      input?.cancel()
+      return
+    }
+    if count == 0 {
       inputWaiter?.resume(returning: nil)
       inputWaiter = nil
       input?.cancel()
@@ -212,8 +224,7 @@ func diagnostic(_ text: String) {
     }
     inputBuffer.append(contentsOf: bytes.prefix(count))
     if inputBuffer.count > 1_048_576 {
-      diagnostic("Input exceeds 1 MiB.")
-      inputWaiter?.resume(returning: nil)
+      inputWaiter?.resume(throwing: MoxError(.contextLimit, "Input exceeds the 1 MiB safety limit."))
       inputWaiter = nil
       input?.cancel()
       return

@@ -1,12 +1,21 @@
 import Foundation
 import MoxCore
 import MoxDomain
-import MoxMLX
+@testable import MoxMLX
 import Testing
 
 @Test(.enabled(if: ProcessInfo.processInfo.environment["MOX_TEST_MODEL"] != nil))
 func realLocalInference() async throws {
   let path = try #require(ProcessInfo.processInfo.environment["MOX_TEST_MODEL"])
+  let tokenizer = try await LocalTokenizerLoader().load(from: URL(fileURLWithPath: path))
+  for text in ["a\u{301}", "👩‍💻", "🇨🇳", "你好\n世界"] {
+    let ids = tokenizer.encode(text: text, addSpecialTokens: false)
+    var decoder = ScalarStreamingDecoder { tokenizer.decode(tokenIds: $0) }
+    var streamed = ""
+    for id in ids { streamed += try decoder.append(id) }
+    streamed += try decoder.finish()
+    #expect(Array(streamed.unicodeScalars) == Array(tokenizer.decode(tokenIds: ids).unicodeScalars))
+  }
   let model = try LocalModel(path: path)
   let budget = try MLXBackend.recommendedBudget()
   let runtime = RuntimeCoordinator(

@@ -171,6 +171,37 @@ with tempfile.TemporaryDirectory(prefix='mox-cli-') as cwd:
             if process.poll() is None: process.kill(); process.wait()
             os.close(read_fd); os.close(write_fd)
 
+    # Noncanonical PTY lets the application, rather than the kernel line limit,
+    # enforce its input byte budget. Normal canonical EOF is tested above.
+    master, slave = pty.openpty()
+    attrs = termios.tcgetattr(slave)
+    attrs[3] &= ~(termios.ICANON | termios.ECHO)
+    termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    process = subprocess.Popen(base, stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
+    os.close(slave)
+    os.set_blocking(master, False)
+    selector = selectors.DefaultSelector()
+    selector.register(process.stderr, selectors.EVENT_READ)
+    sent, stderr = 0, b''
+    deadline = time.monotonic() + 20
+    try:
+        while process.poll() is None and time.monotonic() < deadline:
+            for key, _ in selector.select(.01):
+                stderr += os.read(key.fd, 8192)
+            if b'You>' in stderr and sent < 1_048_577:
+                try:
+                    sent += os.write(master, b'x' * min(4096, 1_048_577 - sent))
+                except BlockingIOError:
+                    pass
+        out, tail = process.communicate(timeout=5)
+        stderr += tail
+        assert sent == 1_048_577 and process.returncode == 1, (sent, process.returncode, stderr)
+        assert b'contextLimit' in stderr and not out, (out, stderr)
+        results['oversized-terminal-input'] = {'bytes': sent, 'exit': process.returncode}
+    finally:
+        if process.poll() is None: process.kill(); process.wait()
+        os.close(master); selector.close()
+
     offline = subprocess.run(['/usr/bin/sandbox-exec', '-p', '(version 1)(allow default)(deny network*)'] + base + ['--prompt', 'Say hello.', '--max-tokens', '4', '--temperature', '0'], capture_output=True, cwd=cwd, timeout=60)
     assert offline.returncode == 0 and offline.stdout.strip(), offline.stderr
     results['network-denied'] = offline.returncode

@@ -88,7 +88,8 @@ private actor MLXLoadedModel: LoadedModel {
         )
       }
       try Task.checkCancellation()
-      var decoder = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+      var decoder = ScalarStreamingDecoder { context.tokenizer.decode(tokenIds: $0) }
+      var decodingError: MoxError?
       var first = true
       // Intentionally use the official callback API: 3.31.4's AsyncStream path
       // allocates an unbounded intermediary. No custom sampler or token loop.
@@ -104,12 +105,23 @@ private actor MLXLoadedModel: LoadedModel {
             first = false
             if !output.emit(.phase("decode")) { return .stop }
           }
-          decoder.append(token: token)
-          if let text = decoder.next(), !text.isEmpty, !output.emit(.contentDelta(text)) {
+          do {
+            let text = try decoder.append(token)
+            if !text.isEmpty, !output.emit(.contentDelta(text)) { return .stop }
+          } catch let error as MoxError {
+            decodingError = error
+            return .stop
+          } catch {
+            decodingError = MoxError(.generationFailed, "Incremental decoding failed.")
             return .stop
           }
           return .more
         })
+      if let decodingError { throw decodingError }
+      if !output.isCancelled, !Task.isCancelled {
+        let tail = try decoder.finish()
+        if !tail.isEmpty { output.emit(.contentDelta(tail)) }
+      }
       let reason: FinishReason
       switch info.stopReason {
       case .stop: reason = .stop

@@ -24,9 +24,11 @@ public struct MLXBackend: RuntimeBackend {
     return Int(budget)
   }
   public func load(_ model: LocalModel) async throws -> any LoadedModel {
+    var stage = BackendFailure.Stage.load
     do {
       let container = try await LLMModelFactory.shared.loadContainer(
         from: model.directory, using: LocalTokenizerLoader())
+      stage = .warmup
       let warmupStart = ContinuousClock.now
       try await container.perform { (context: ModelContext) in
         let input = try await context.processor.prepare(
@@ -41,20 +43,10 @@ public struct MLXBackend: RuntimeBackend {
         "model=\(model.id, privacy: .public) phase=warmup elapsed=\(String(describing: warmupStart.duration(to: .now)), privacy: .public)"
       )
       return MLXLoadedModel(container: container, contextSize: model.contextSize)
-    } catch let error as MoxError {
-      Stream().synchronize()
-      Memory.clearCache()
-      throw error
     } catch {
-      Logger(subsystem: "dev.mox", category: "runtime").error(
-        "model=\(model.id, privacy: .public) phase=load_failed error_type=\(String(reflecting: type(of: error)), privacy: .public)"
-      )
       Stream().synchronize()
       Memory.clearCache()
-      throw MoxError(
-        .loadFailed,
-        "Official MLX factory could not load/warm this local model. Check config, weights and tokenizer compatibility."
-      )
+      throw BackendFailure(error, stage: stage)
     }
   }
 }
@@ -78,63 +70,72 @@ private actor MLXLoadedModel: LoadedModel {
         Stream().synchronize()
         Memory.clearCache()
       }
-      try Task.checkCancellation()
-      let input = try await context.processor.prepare(input: UserInput(prompt: .messages(messages)))
-      let promptTokens = input.text.tokens.size
-      guard promptTokens <= 8192, promptTokens + request.sampling.maxTokens <= limit else {
-        throw MoxError(
-          .contextLimit,
-          "Tokenized input plus requested output exceeds model context or the M1 8192-token input budget; history was not truncated."
-        )
+      var stage = BackendFailure.Stage.prepare
+      do {
+        try Task.checkCancellation()
+        let input = try await context.processor.prepare(
+          input: UserInput(prompt: .messages(messages)))
+        let promptTokens = input.text.tokens.size
+        guard promptTokens <= 8192, promptTokens + request.sampling.maxTokens <= limit else {
+          throw MoxError(
+            .contextLimit,
+            "Tokenized input plus requested output exceeds model context or the M1 8192-token input budget; history was not truncated."
+          )
+        }
+        try Task.checkCancellation()
+        stage = .generate
+        var decoder = ScalarStreamingDecoder { context.tokenizer.decode(tokenIds: $0) }
+        var decodingError: MoxError?
+        var first = true
+        // Intentionally use the official callback API: 3.31.4's AsyncStream path
+        // allocates an unbounded intermediary. No custom sampler or token loop.
+        let info: GenerateCompletionInfo = try MLXLMCommon.generate(
+          input: input,
+          parameters: GenerateParameters(
+            maxTokens: request.sampling.maxTokens, temperature: request.sampling.temperature,
+            topP: request.sampling.topP, prefillStepSize: 128),
+          context: context,
+          didGenerate: { (token: Int) in
+            if output.isCancelled || Task.isCancelled { return .stop }
+            if first {
+              first = false
+              if !output.emit(.phase("decode")) { return .stop }
+            }
+            do {
+              let text = try decoder.append(token)
+              if !text.isEmpty, !output.emit(.contentDelta(text)) { return .stop }
+            } catch let error as MoxError {
+              decodingError = error
+              return .stop
+            } catch {
+              decodingError = MoxError(.generationFailed, "Incremental decoding failed.")
+              return .stop
+            }
+            return .more
+          })
+        if let decodingError { throw decodingError }
+        if !output.isCancelled, !Task.isCancelled {
+          let tail = try decoder.finish()
+          if !tail.isEmpty { output.emit(.contentDelta(tail)) }
+        }
+        let reason: FinishReason
+        switch info.stopReason {
+        case .stop: reason = .stop
+        case .length: reason = .length
+        case .cancelled: reason = .cancelled
+        }
+        Logger(subsystem: "dev.mox", category: "runtime").info(
+          "request=\(request.id.uuidString, privacy: .public) peak_mlx_bytes=\(Memory.peakMemory)")
+        return BackendResult(
+          reason: reason,
+          usage: Usage(
+            promptTokens: info.promptTokenCount, outputTokens: info.generationTokenCount,
+            prefillSeconds: info.promptTime, decodeSeconds: info.generateTime))
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        throw BackendFailure(error, stage: stage)
       }
-      try Task.checkCancellation()
-      var decoder = ScalarStreamingDecoder { context.tokenizer.decode(tokenIds: $0) }
-      var decodingError: MoxError?
-      var first = true
-      // Intentionally use the official callback API: 3.31.4's AsyncStream path
-      // allocates an unbounded intermediary. No custom sampler or token loop.
-      let info: GenerateCompletionInfo = try MLXLMCommon.generate(
-        input: input,
-        parameters: GenerateParameters(
-          maxTokens: request.sampling.maxTokens, temperature: request.sampling.temperature,
-          topP: request.sampling.topP, prefillStepSize: 128),
-        context: context,
-        didGenerate: { (token: Int) in
-          if output.isCancelled || Task.isCancelled { return .stop }
-          if first {
-            first = false
-            if !output.emit(.phase("decode")) { return .stop }
-          }
-          do {
-            let text = try decoder.append(token)
-            if !text.isEmpty, !output.emit(.contentDelta(text)) { return .stop }
-          } catch let error as MoxError {
-            decodingError = error
-            return .stop
-          } catch {
-            decodingError = MoxError(.generationFailed, "Incremental decoding failed.")
-            return .stop
-          }
-          return .more
-        })
-      if let decodingError { throw decodingError }
-      if !output.isCancelled, !Task.isCancelled {
-        let tail = try decoder.finish()
-        if !tail.isEmpty { output.emit(.contentDelta(tail)) }
-      }
-      let reason: FinishReason
-      switch info.stopReason {
-      case .stop: reason = .stop
-      case .length: reason = .length
-      case .cancelled: reason = .cancelled
-      }
-      Logger(subsystem: "dev.mox", category: "runtime").info(
-        "request=\(request.id.uuidString, privacy: .public) peak_mlx_bytes=\(Memory.peakMemory)")
-      return BackendResult(
-        reason: reason,
-        usage: Usage(
-          promptTokens: info.promptTokenCount, outputTokens: info.generationTokenCount,
-          prefillSeconds: info.promptTime, decodeSeconds: info.generateTime))
     }
   }
   func unload() async {

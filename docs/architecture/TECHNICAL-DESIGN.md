@@ -345,3 +345,7 @@ Swift Testing 测纯策略/服务；真实 HTTP server 测 framing/backpressure�
 - `scripts/build-m1.sh` 用完整 Xcode 编译 Metal，把官方资源库以 `mlx.metallib` 与可执行文件并置，同时携带资源 bundles；这是上游 device.cpp 明确支持的定位路径。`swift build/test` 单独不会编译 Metal；真实测试通过 `scripts/test-m1-real.sh` 放置该资源。开发机额外安装了 Apple Metal Toolchain 17F109，非产品运行时依赖。
 
 核验来源：[MLX 发布版](https://github.com/ml-explore/mlx-swift/releases/tag/0.31.6)、[LM 发布版](https://github.com/ml-explore/mlx-swift-lm/releases/tag/3.31.4)及对应锁定 checkout 源码。实际通过范围与复现证据见 [M1 验收报告](../acceptance/M1.md)。
+
+### M1 错误诊断边界
+
+Core 的 BackendFailure 保留脱敏诊断，MLX/tokenizer 适配器在 load、tokenizer、warmup、prepare、generate 边界分类，Coordinator 统一附加 request/model 标识写入 Unified Logging，再返回稳定 MoxError。DecodingError 区分 keyNotFound/typeMismatch/valueNotFound/dataCorrupted；coding path 最多 16 段，只记录允许的配置字段名，其他键及数组索引脱敏。NSError 仅公开标准 Cocoa/POSIX/URL domain 与数值 code；未知 domain 脱敏。不记录 localizedDescription、debugDescription、userInfo 或任意底层错误正文。包装跨边界时保留最初阶段与分类；取消仍按取消语义结束。

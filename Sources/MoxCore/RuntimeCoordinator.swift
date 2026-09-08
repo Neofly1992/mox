@@ -107,6 +107,7 @@ public actor RuntimeCoordinator {
     var acquired = false
     var extra = 0
     var terminal: GenerationPayload
+    var stage = BackendFailure.Stage.admission
     do {
       handle.emit(.phase("queued"))
       try await acquire(request.id)
@@ -114,6 +115,7 @@ public actor RuntimeCoordinator {
       try Task.checkCancellation()
       try model.validateUnchanged()
       try validateResidentReference(model)
+      stage = .load
       if let load = loads[model.id], slots[model.id] == nil { _ = try await load.value }
       let needsLoad = slots[model.id] == nil
       let required = transient + (needsLoad ? model.weightBytes * 2 : 0)
@@ -167,6 +169,7 @@ public actor RuntimeCoordinator {
       tick += 1
       slots[model.id]?.tick = tick
       handle.emit(.phase("prefill"))
+      stage = .generate
       let result = try await slot.loaded.generate(request, output: handle)
       if let usage = result.usage {
         handle.emit(.usage(usage))
@@ -175,13 +178,17 @@ public actor RuntimeCoordinator {
         )
       }
       terminal = .finished(result.reason)
-    } catch is CancellationError { terminal = .finished(.cancelled) } catch let error as MoxError {
+    } catch is CancellationError { terminal = .finished(.cancelled) } catch let failure
+      as BackendFailure
+    {
+      failure.record(modelID: model.id, requestID: request.id)
+      terminal = .failed(failure.clientError)
+    } catch let error as MoxError {
       terminal = .failed(error)
     } catch {
-      terminal = .failed(
-        MoxError(
-          .generationFailed,
-          "Backend operation failed; inspect runtime diagnostics and model assets."))
+      let failure = BackendFailure(error, stage: stage)
+      failure.record(modelID: model.id, requestID: request.id)
+      terminal = .failed(failure.clientError)
     }
     leases.remove(request.id)
     reserved -= extra

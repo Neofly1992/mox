@@ -1,11 +1,15 @@
 import Foundation
 import MLXLMCommon
+import MoxCore
 import MoxDomain
 import Tokenizers
 
 struct LocalTokenizerLoader: TokenizerLoader {
   func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
-    let tokenizer = try await AutoTokenizer.from(modelFolder: directory)
+    let tokenizer: any Tokenizers.Tokenizer
+    do { tokenizer = try await AutoTokenizer.from(modelFolder: directory) } catch {
+      throw BackendFailure(error, stage: .tokenizer)
+    }
     guard tokenizer.hasChatTemplate else {
       throw MoxError(.invalidModel, "A local chat template is required.")
     }

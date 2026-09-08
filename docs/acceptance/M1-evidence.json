@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "final_source_commit": "9df437bcb390b5079ac6107ddb5458be7eaa6210",
+  "final_source_commit": "967c6fb68a59ebe6660e1b5e32358247d64d6f99",
   "verification_dates": [
-    "2026-09-07"
+    "2026-09-08"
   ],
   "environment": {
     "chip": "Apple M4",
@@ -20,7 +20,7 @@
   },
   "real_core_tests": {
     "passed_process_runs": 1,
-    "date": "2026-09-07",
+    "date": "2026-09-08",
     "scratch_path": ".build/m1-tests",
     "coverage": [
       "combining marks, emoji ZWJ and regional indicators",
@@ -30,7 +30,7 @@
       "real load, stream, cancel, regenerate, overflow, shutdown",
       "PTY oversized input exits 1; ordinary EOF exits 0"
     ],
-    "observed_cancel_wait_seconds": 0.012634291
+    "observed_cancel_wait_seconds": 0.011694834
   },
   "cli": {
     "relocated-artifact": true,
@@ -39,16 +39,16 @@
     "unknown-option": 2,
     "non-tty-input": 2,
     "missing-model": 1,
-    "interactive-cancel-wait-seconds": 0.008445749999737018,
+    "interactive-cancel-wait-seconds": 0.008676207999997132,
     "SIGINT": 130,
     "SIGTERM": 143,
     "full-stderr-pipe": {
       "exit": 0,
-      "seconds": 0.41330491700000493
+      "seconds": 0.4176051249996817
     },
     "full-stdout-pipe": {
       "exit": 1,
-      "seconds": 5.435503000000153
+      "seconds": 5.437617834000321
     },
     "oversized-terminal-input": {
       "bytes": 1048577,
@@ -58,22 +58,35 @@
     "model-assets-unchanged": true
   },
   "artifacts": {
-    "mox": "4d3d0f9703dd5e1ed0c0555389dab5c2696b4ae61c629e357660e9c20ac7e669",
+    "mox": "3dd29ee2d2db4eaf9e51e18ad6357ba01996d39fdd1de1157d6cc2644adbd372",
     "mlx.metallib": "24d4cfcd3ca8b15ead691e46219f35adabbea64c9f8de4eae9bf293fd8d5eb7b"
   },
   "review": {
     "implementer_self_test": "passed",
-    "independent_review": "not performed",
+    "independent_review": "completed; R1 fixed and retested by implementer; independent re-review pending",
     "user_acceptance": "pending",
-    "same_session_review": "two P2 findings fixed and retested; independent review not performed"
+    "same_session_review": "completed"
   },
   "rule_tests": {
-    "passed": 18,
-    "date": "2026-09-07",
-    "source_commit": "9df437bcb390b5079ac6107ddb5458be7eaa6210"
+    "passed": 20,
+    "date": "2026-09-08",
+    "source_commit": "967c6fb68a59ebe6660e1b5e32358247d64d6f99"
   },
   "unmeasured_benchmarks": [
     "cold load",
     "peak RSS"
-  ]
+  ],
+  "diagnostics": {
+    "classification_and_redaction_tests": "passed",
+    "coordinator_fault_injection": "passed",
+    "real_tokenizer_failure": {
+      "exit": 1,
+      "stage": "tokenizer",
+      "error_type": "Hub.Hub.HubClientError",
+      "category": "backendError",
+      "domain": "redacted",
+      "code": 1,
+      "sensitive_content_absent": true
+    }
+  }
 }

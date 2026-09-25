@@ -71,6 +71,10 @@ public actor RuntimeCoordinator {
     self.policy = policy
     self.availableMemory = availableMemory
   }
+  public func modelStates() -> [(id: String, state: String)] {
+    let ids = Set(slots.keys).union(loads.keys)
+    return ids.sorted().map { ($0, slots[$0] == nil ? "loading" : "ready") }
+  }
   public func snapshot() -> RuntimeSnapshot {
     .init(
       residentModels: slots.count, reservedBytes: reserved, activeLeases: leases.count,
@@ -121,45 +125,14 @@ public actor RuntimeCoordinator {
       let required = transient + (needsLoad ? model.weightBytes * 2 : 0)
       // Dynamic pressure may tighten the configured ceiling. Reclaim idle residents
       // before rejecting, and keep their reservation until backend unload returns.
-      let headroom = availableMemory().map { Int(Double($0) * 0.8) }
-      let ceiling = min(policy.budgetBytes, headroom.map { reserved + $0 } ?? policy.budgetBytes)
-      while reserved + required > ceiling {
-        guard
-          let idle = slots.values.filter({ $0.model.id != model.id }).min(by: { $0.tick < $1.tick })
-        else { throw MoxError(.resourceLimit, "No idle model can free enough memory.") }
-        slots.removeValue(forKey: idle.model.id)
-        await idle.loaded.unload()
-        reserved -= idle.model.weightBytes
-      }
+      try await reclaimCapacity(required: required, excluding: model.id)
       // The actor publishes the full reservation BEFORE loader/GPU suspension.
       extra = required
       reserved += extra
       if needsLoad {
         handle.emit(.phase("loading"))
-        let interval = signposter.beginInterval("load")
-        let began = ContinuousClock.now
-        do {
-          let loader = Task.detached { [backend] in try await backend.load(model) }
-          loads[model.id] = loader
-          let loaded = try await loader.value
-          do { try model.validateUnchanged() } catch {
-            await loaded.unload()
-            let changed = MoxError(.invalidModel, "Referenced assets changed during loading.")
-            loads[model.id] = Task { throw changed }
-            throw changed
-          }
-          tick += 1
-          slots[model.id] = Slot(model: model, loaded: loaded, tick: tick)
-          loads.removeValue(forKey: model.id)
-          extra -= model.weightBytes  // resident portion transfers to the slot
-          logger.info(
-            "model=\(model.id, privacy: .public) request=\(request.id.uuidString, privacy: .public) load_seconds=\(Self.seconds(began.duration(to: .now))) weights=\(model.weightBytes) transient=\(transient)"
-          )
-          signposter.endInterval("load", interval)
-        } catch {
-          signposter.endInterval("load", interval)
-          throw error
-        }
+        try await loadIntoSlot(model, requestID: request.id, transient: transient)
+        extra -= model.weightBytes
       }
       try Task.checkCancellation()
       guard let slot = slots[model.id] else {
@@ -204,6 +177,73 @@ public actor RuntimeCoordinator {
       logger.info(
         "request=\(request.id.uuidString, privacy: .public) phase=cancel cancel_wait_seconds=\(Self.seconds(elapsed))"
       )
+    }
+  }
+  /// Explicit load and generation use the same admission and backend transition.
+  public func load(model: LocalModel) async throws {
+    guard !closing else { throw MoxError(.shuttingDown, "Runtime is shutting down.") }
+    try model.validateUnchanged()
+    try validateResidentReference(model)
+    if slots[model.id] != nil { return }
+    guard model.weightBytes * 2 <= policy.budgetBytes else {
+      throw MoxError(.resourceLimit, "Model load peak exceeds the safe memory budget.")
+    }
+    let id = UUID()
+    try await acquire(id)
+    var extra = 0
+    do {
+      try Task.checkCancellation()
+      if slots[model.id] == nil {
+        try await reclaimCapacity(required: model.weightBytes * 2, excluding: model.id)
+        extra = model.weightBytes * 2
+        reserved += extra
+        try await loadIntoSlot(model, requestID: id, transient: 0)
+        extra -= model.weightBytes
+      }
+      reserved -= extra
+      release()
+    } catch {
+      reserved -= extra
+      release()
+      throw error
+    }
+  }
+  private func reclaimCapacity(required: Int, excluding modelID: String) async throws {
+    let headroom = availableMemory().map { Int(Double($0) * 0.8) }
+    let ceiling = min(policy.budgetBytes, headroom.map { reserved + $0 } ?? policy.budgetBytes)
+    while reserved + required > ceiling {
+      guard let idle = slots.values.filter({ $0.model.id != modelID }).min(by: { $0.tick < $1.tick })
+      else { throw MoxError(.resourceLimit, "No idle model can free enough memory.") }
+      slots.removeValue(forKey: idle.model.id)
+      await idle.loaded.unload()
+      reserved -= idle.model.weightBytes
+    }
+  }
+  private func loadIntoSlot(_ model: LocalModel, requestID: UUID, transient: Int) async throws {
+    if let load = loads[model.id], slots[model.id] == nil { _ = try await load.value }
+    guard slots[model.id] == nil else { return }
+    let interval = signposter.beginInterval("load")
+    let began = ContinuousClock.now
+    do {
+      let loader = Task.detached { [backend] in try await backend.load(model) }
+      loads[model.id] = loader
+      let loaded = try await loader.value
+      do { try model.validateUnchanged() } catch {
+        await loaded.unload()
+        let changed = MoxError(.invalidModel, "Referenced assets changed during loading.")
+        loads[model.id] = Task { throw changed }
+        throw changed
+      }
+      tick += 1
+      slots[model.id] = Slot(model: model, loaded: loaded, tick: tick)
+      loads.removeValue(forKey: model.id)
+      logger.info(
+        "model=\(model.id, privacy: .public) request=\(requestID.uuidString, privacy: .public) load_seconds=\(Self.seconds(began.duration(to: .now))) weights=\(model.weightBytes) transient=\(transient)"
+      )
+      signposter.endInterval("load", interval)
+    } catch {
+      signposter.endInterval("load", interval)
+      throw error
     }
   }
   private func validateResidentReference(_ model: LocalModel) throws {

@@ -114,6 +114,8 @@ InstalledModelID  本地 installation UUID；API/管理动作使用此 ID 或唯
 
 CLI 建议 `hf:org/repo@revision`、`ms:org/repo@revision`、`work:org/repo@revision`；具体字符转义按 provider 校验。短 `org/repo` 使用 defaultRegistry，省略 revision 由 provider 解析默认分支后固定。API model 接受本地唯一 alias 或 installation ID；冲突报错，不猜测。请求时冻结 artifact ID，之后 alias 更新不改变在途请求。
 
+M3 的管理 alias 以 registry/repository/variant 为稳定当前引用，旧安装保留含精确 revision 的 alias。新安装的目录提交与 alias 切换在一份 RuntimeStore 快照中保存；失败不移动当前引用。可显式选择旧版，CLI 的来源参数省略时读取 defaultRegistry。来源凭据更新使用新的 Keychain 引用，配置冲突/保存失败只清理新引用，不覆盖仍在使用的旧凭据。
+
 RegistryConfig：id、displayName、providerKind、origin endpoint、mirror policies、credential reference。Mirror 是同一 registry 的访问替代，不能改变来源身份；用户配置任意端点必须符合支持的 provider 协议。第一版 HF、ModelScope，加自定义同协议实例；OCI/静态 manifest 不在 v1。
 
 `ModelSource` 是 snapshot 级接口：resolve(reference)、describeSnapshot(resolved)、materialize(snapshot, staging, operationContext)。返回相对路径、实际大小/未知标记、校验类型/值、revision、必要资产和能力线索。不能强迫所有 provider 实现相同字节传输方式，否则会失去 HF 官方 SDK 的复用。
@@ -144,6 +146,8 @@ created → resolving → downloading ⇄ paused
 6. 已安装快照不可原地更新。旧版引用计数和 request lease 归零后才 GC。
 
 数据库保存与 rename 不构成一个事务：崩溃后扫描 prepared manifest 修复“文件已提交、索引未提交”；“索引在、文件缺”标 missing，不能显示 ready。已有快照一律不覆盖。
+
+M3 独立审查修正：单个 artifact 缺文件、digest 不符或 manifest 损坏不得阻断整个服务启动；保留可移除的坏安装记录并拒绝加载，健康安装继续可用。启动时必须避免对每个已安装权重做不必要的同步，完整性校验与服务可用性分离并给出安全诊断。模型库传输按配置、摘要分页和文件详情拆分，服务响应与客户端限额一致；持久化按独立身份查询，不能让单条全库 JSON 随任务进度增长。
 
 下载器规则：优先系统 downloadTask/SDK；resumeData 是恢复优化，不保证任意崩溃后一定可续。下载暂停恢复、服务重启和远端改变必须验收；不成立时从已完成文件继续，对失效 partial 明确重下。需要手动 Range 的 provider 才做单流校验实现，检查 200/206/416、Content-Range 与 validator，分块写/hash，无大 Data 预分配。Apple 提供 downloadTask resume 入口，但 Mox 仍负责业务恢复语义。[Foundation](https://developer.apple.com/documentation/foundation/urlsession/downloadtask(withresumedata:))
 
@@ -261,7 +265,7 @@ CLI 产品建议：`pull/list/show/remove/load/unload/chat/serve/status/config/d
 
 autosave 不用于业务完成保证：安装状态、终态、配置等明确 save；流式文本初始每 250ms 或累计 8KiB checkpoint 一次（待性能校准），终态立即保存。崩溃可能丢最后一次 checkpoint 后少量文本，应显示 interrupted；不宣称逐 token 持久化。
 
-使用 VersionedSchema/SchemaMigrationPlan 作为发布后演进机制，当前第一版只建干净 V1。启动 store 失败明确报错，不删除用户对话、不回退空库。备份走应用导出/受控 store 关闭后的完整备份，禁止运行中只复制单个底层 sqlite 文件。
+使用 VersionedSchema/SchemaMigrationPlan 管理磁盘 schema。M2 当前使用 V2，V1 仅保留为现有聊天数据的迁移输入：保留消息、标识与分支，压缩重复的请求正文为采样参数；新库直接创建 V2。启动 store 失败明确报错，不删除用户对话、不回退空库。备份走应用导出/受控 store 关闭后的完整备份，禁止运行中只复制单个底层 sqlite 文件。
 
 配置：SwiftData 中持久设置为权威；启动 flags > MOX_* 环境 > 持久设置 > 默认，形成只读 EffectiveConfig（每字段 provenance）。临时覆盖不回写；`config set` 经管理接口更新。JSON 导入/导出只作显式交换格式，不同时监听第二份配置文件。显示被启动参数覆盖的设置，避免 UI 显示保存成功却不生效。
 
@@ -280,6 +284,8 @@ autosave 不用于业务完成保证：安装状态、终态、配置等明确 s
 模型 root 可配置；迁移目录为显式带进度操作，不因改文本路径就移动。Keychain 保存长期凭据，锁定/拒绝访问时返回可恢复错误，Homebrew 启动不可静默降级明文存储。
 
 ## 10. GUI、分发与诊断
+
+GUI 默认进入模型工作台；M2 一级导航仅模型与测试，会话列表属于测试区域并可收起。摘要与详情分离、替换式有界分页；消息与生成参数使用存储模型自己的编码，HTTP DTO仅位于传输边界。现有聊天经显式schema迁移保留，具体容量与失败诊断以M2规格为准。关闭窗口保留当前模块，重新启动默认模型页。M3/M4 再提供下载/API 页面，不以不可用按钮预建功能。
 
 2026-09-06 用户澄清：0.1 是本机原型验收，App 本地构建仍需完成；下述公开签名、公证、Homebrew 分发要求延后到 P1。Pi 后置；不要求 Codex 或 Responses。
 
@@ -349,3 +355,16 @@ Swift Testing 测纯策略/服务；真实 HTTP server 测 framing/backpressure�
 ### M1 错误诊断边界
 
 Core 的 BackendFailure 保留脱敏诊断，MLX/tokenizer 适配器在 load、tokenizer、warmup、prepare、generate 边界分类，Coordinator 统一附加 request/model 标识写入 Unified Logging，再返回稳定 MoxError。DecodingError 区分 keyNotFound/typeMismatch/valueNotFound/dataCorrupted；coding path 最多 16 段，只记录允许的配置字段名，其他键及数组索引脱敏。NSError 仅公开标准 Cocoa/POSIX/URL domain 与数值 code；未知 domain 脱敏。不记录 localizedDescription、debugDescription、userInfo 或任意底层错误正文。包装跨边界时保留最初阶段与分类；取消仍按取消语义结束。
+
+## 14. M2 实施细化（2026-09-08，入口已满足）
+
+本阶段具体契约与验收权威见 [M2 规格](../milestones/M2.md)，该规格尚未表示实现完成。沿用上述模块、鉴权 loopback、单一服务所有权与 App 独占 SwiftData 对话库的方向。
+
+阶段收敛：M2 `serve` 仅私有 listener，公开端口/标准推理协议到 M4；GUI 单次仅一个活动聊天生成，Core 仍处理多 client 的有界排队。控制己方 worker 关闭使用父子控制管道，管理 bearer 不自动授予对任意已有服务的关闭权。私有协议不重放生成，重连取 snapshot 并处理残留请求，原聊天保持中断。重试分支与成功轮次上下文规则、显式 checkpoint/save、流及诊断容量、实际 M1 状态映射由 M2 规格细化，不另复制 schema。
+
+M1 现有 loading 包含 warmup，prefill 包含输入准备；共享加载及同步 prefill 的取消要等待上游边界，UI 不承诺瞬时释放。M2 必须补长输出解码成本与加载/prefill/decode 分阶段真机取消证据，未验证前不写性能通过。
+
+
+M2实现约束：App/worker共享生产源码buildID，Debug/Release产物分别构建并标识配置，嵌入配置保持一致。超时/流队列容量及UI刷新、checkpoint节奏由所属模块的命名策略统一维护；UI删除可用性与控制器使用同一判断，聊天快照落盘复用同一映射。取消覆盖本地保存准备与远程生成两个阶段；传输结束和continuation注册在同一同步边界协调。已核验的HTTP拒绝与已接受流的断连分开处理，前者保留请求错误且不发取消。文件锁描述符仅在初始化成功后交接所有权，失败路径释放一次。SwiftData容器构造串行、各ModelActor保存独立执行。长回复使用单层稳定ID的分段惰性布局，官方tokenizer首token即时、后续按批次/时间合并解码；状态、指标及最终验收证据见M2规格与报告。
+
+SwiftData 分页查询使用原生复合索引，依据 [Apple WWDC24 SwiftData 索引说明](https://developer.apple.com/videos/play/wwdc2024/10137/)，实际迁移与查询行为以本项目回归验证。

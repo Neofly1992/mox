@@ -26,6 +26,8 @@
 
 ## 1. 产品目标（已确认）
 
+GUI 以模型获取、管理和运行为默认视角；对话属于模型测试环境，测试记录在测试模块内组织，不占全局模块侧栏。
+
 让用户在 Apple Silicon macOS 上快速获取、管理和运行 MLX 模型：先在原生 GUI 中下载、聊天和测试，再通过 OpenAI/Anthropic 兼容协议供外部 agent 使用。
 
 GUI 提供基本对话能力，不建设完整自研 agent。CLI/GUI 的操作一致性参考 Ollama、Docker。优先复用官方 MLX 能力；不自行实现模型架构、推理 kernel 或已有上游能力。

@@ -27,3 +27,13 @@ import Testing
   #expect(try decoder.append(1) == "a")
   #expect(throws: MoxError.self) { try decoder.append(2) }
 }
+
+@Test func batchedStreamingKeepsFirstContentAndFlushesUnicodeTail() throws {
+  let pieces = ["a", "\u{301}", "👩", "\u{200d}", "💻", "\n", "中"]
+  var decoder = ScalarStreamingDecoder(batchSize: 8) { ids in ids.map { pieces[$0] }.joined() }
+  var result = try decoder.append(0)
+  #expect(result == "a")
+  for index in 1..<pieces.count { result += try decoder.append(index) }
+  result += try decoder.finish()
+  #expect(Array(result.unicodeScalars) == Array(pieces.joined().unicodeScalars))
+}

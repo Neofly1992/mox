@@ -1,9 +1,10 @@
 import ArgumentParser
 import Darwin
 import Foundation
-import MoxCore
+import MoxBootstrap
+import MoxClient
 import MoxDomain
-import MoxMLX
+import MoxProtocol
 
 @main struct Mox: AsyncParsableCommand {
   static func main() async {
@@ -25,11 +26,13 @@ import MoxMLX
   }
 
   static let configuration = CommandConfiguration(
-    commandName: "mox", abstract: "Local MLX text inference", subcommands: [Chat.self])
+    commandName: "mox", abstract: "Local MLX text inference",
+    version: "\(Wire.buildID) (\(BuildInfo.configuration))", subcommands: [Chat.self, Serve.self, Models.self])
 }
 struct Chat: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
-    abstract: "Chat with a read-only local MLX model directory.")
+    abstract: "Chat with a local MLX model directory or installed model alias.")
+  @Option var dataRoot: String = ServiceFiles.defaultRoot
   @Option var modelPath: String
   @Option var prompt: String?
   @Option var maxTokens: Int = 2048
@@ -57,22 +60,19 @@ struct Chat: AsyncParsableCommand {
       diagnostic("invalidParameters: non-terminal stdin requires --prompt.")
       throw ExitCode(2)
     }
-    let runtime: RuntimeCoordinator
-    let model: LocalModel
+    let connection: Connection
     do {
-      model = try LocalModel(path: modelPath)
-      let budget = try MLXBackend.recommendedBudget()
-      runtime = RuntimeCoordinator(
-        backend: MLXBackend(memoryLimit: budget), policy: RuntimePolicy(budgetBytes: budget),
-        availableMemory: { SystemMemory.availableBytes() })
-      diagnostic("model=\(model.id) budget_bytes=\(budget) weights_bytes=\(model.weightBytes)")
+      connection = try await Connection.open(
+        root: dataRoot, executable: ExecutableLocation.current())
     } catch {
       diagnostic(String(describing: error))
       throw ExitCode(1)
     }
     let driver = await ChatDriver(
-      runtime: runtime, model: model, sampling: sampling, oneShot: prompt != nil)
+      client: connection.client, modelPath: modelPath, sampling: sampling, oneShot: prompt != nil)
     let status = await driver.run(prompt: prompt)
+    connection.worker?.requestStop()
+    if let worker = connection.worker, !(await worker.wait()) { await worker.forceStop() }
     throw ExitCode(status)
   }
 }
@@ -83,11 +83,11 @@ func diagnostic(_ text: String) {
 }
 
 @MainActor final class ChatDriver {
-  let runtime: RuntimeCoordinator
-  let model: LocalModel
+  let client: ServiceClient
+  let modelPath: String
   let sampling: Sampling
   let oneShot: Bool
-  var active: GenerationHandle?
+  var active: RemoteGeneration?
   var exiting: Int32?
   var interruptedBeforeHandle = false
   var working = false
@@ -95,9 +95,9 @@ func diagnostic(_ text: String) {
   var input: DispatchSourceRead?
   var inputWaiter: CheckedContinuation<String?, Error>?
   var inputBuffer = Data()
-  init(runtime: RuntimeCoordinator, model: LocalModel, sampling: Sampling, oneShot: Bool) {
-    self.runtime = runtime
-    self.model = model
+  init(client: ServiceClient, modelPath: String, sampling: Sampling, oneShot: Bool) {
+    self.client = client
+    self.modelPath = modelPath
     self.sampling = sampling
     self.oneShot = oneShot
   }
@@ -133,11 +133,12 @@ func diagnostic(_ text: String) {
       interruptedBeforeHandle = false
       do {
         let request = try session.request(prompt: text, sampling: sampling)
-        let handle = try await runtime.generate(model: model, request: request)
+        let handle = try client.generate(path: modelPath, request: request)
         active = handle
         if interruptedBeforeHandle || exiting != nil { handle.cancel() }
         var reply = ""
-        for await event in handle.events {
+        var finishedReason: FinishReason?
+        for try await event in handle.events {
           switch event.payload {
           case .contentDelta(let delta):
             try await writeOutput(delta, handle: handle)
@@ -149,13 +150,18 @@ func diagnostic(_ text: String) {
             )
           case .finished(let reason):
             diagnostic("request=\(event.requestID) finished=\(reason.rawValue)")
-            session.complete(prompt: text, reply: reply, reason: reason)
+            finishedReason = reason
           case .failed(let error):
             diagnostic("request=\(event.requestID) \(error)")
             result = 1
           }
         }
-        await handle.waitUntilStopped()
+        guard await handle.waitUntilStopped() else {
+          throw MoxError(.connectionLost, "Cannot confirm generation stopped.")
+        }
+        if let finishedReason {
+          session.complete(prompt: text, reply: reply, reason: finishedReason)
+        }
         try await writeOutput("\n", handle: nil)
       } catch {
         active?.cancel()
@@ -166,7 +172,6 @@ func diagnostic(_ text: String) {
       active = nil
       working = false
     } while !oneShot && exiting == nil
-    await runtime.shutdown()
     input?.cancel()
     sources.forEach { $0.cancel() }
     return exiting ?? result
@@ -224,7 +229,8 @@ func diagnostic(_ text: String) {
     }
     inputBuffer.append(contentsOf: bytes.prefix(count))
     if inputBuffer.count > 1_048_576 {
-      inputWaiter?.resume(throwing: MoxError(.contextLimit, "Input exceeds the 1 MiB safety limit."))
+      inputWaiter?.resume(
+        throwing: MoxError(.contextLimit, "Input exceeds the 1 MiB safety limit."))
       inputWaiter = nil
       input?.cancel()
       return
@@ -240,7 +246,7 @@ func diagnostic(_ text: String) {
 }
 
 /// Nonblocking stdout with a bounded write deadline; main actor stays available to signals.
-func writeOutput(_ text: String, handle: GenerationHandle?) async throws {
+func writeOutput(_ text: String, handle: RemoteGeneration?) async throws {
   let data = Data(text.utf8)
   let deadline = ContinuousClock.now.advanced(by: .seconds(5))
   var offset = 0

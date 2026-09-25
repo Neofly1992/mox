@@ -1,0 +1,85 @@
+{
+  "milestone": "M3",
+  "independentReview": {
+    "path": "docs/reviews/M3-independent-2026-09-24.md",
+    "R1": "source fix and isolated real HF pull passed; independent re-review pending",
+    "R2": "source fix, three corruption fixtures and isolated real corrupt install management passed; independent re-review pending",
+    "R3": "source fix, bounded HTTP large-library test and record persistence test passed; independent re-review pending"
+  },
+  "date": "2026-09-25",
+  "branch": "codex/rewrite",
+  "buildID": "mox-m3-e5a062f7623cd09d7fdd853905f38c1db243fed48e7142ea3a1bbaeac602f447",
+  "releaseApp": ".build/m3/Release/Mox.app",
+  "releaseCLI": ".build/m3-worker/Release/mox",
+  "automatedTests": {
+    "passed": 84,
+    "log": ".build/m3-r3-final-tests.log",
+    "finalFixtureRetest": ".build/m3-r3-large-library-final.log"
+  },
+  "gui": {
+    "result": "passed with matching Debug worker",
+    "scenario": "Real Hugging Face plan, download, install, details, MLX chat; configured mirror retained after sheet reopen",
+    "log": ".build/m3-r3-ui-rerun.log",
+    "xcresult": ".build/m3-app/Logs/Test/Test-Mox-2026.09.25_03-27-38-+0800.xcresult"
+  },
+  "realModels": [
+    {
+      "provider": "huggingFace",
+      "revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+      "files": 9,
+      "verifiedBytes": 289598797,
+      "chatExit": 0,
+      "replyCharacters": 34,
+      "elapsedSeconds": 75.86
+    },
+    {
+      "provider": "modelScope",
+      "revision": "7b36975ed2397d6eb8fb55cb5a58437bd7ca5b10",
+      "files": 9,
+      "verifiedBytes": 289598797,
+      "chatExit": 0,
+      "replyCharacters": 91,
+      "elapsedSeconds": 19.42
+    }
+  ],
+  "recovery": {
+    "revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+    "verifiedBeforeRestart": 605,
+    "verifiedAfterResume": 289598797,
+    "installations": 1,
+    "log": ".build/m3-recovery-real-run.log"
+  },
+  "unverified": [
+    "real private custom mirror",
+    "physical network interruption",
+    "real MLX inference versus deletion race",
+    "multi-process two-client configuration consistency",
+    "macOS 15 device"
+  ],
+  "manualAcceptance": "not completed; R1-R3 independent re-review pending",
+  "notes": "Local .build logs and artifacts are temporary; no credentials or model weights are included in this evidence file.",
+  "defaultSourceRealPlan": {
+    "provider": "modelScope",
+    "revision": "7b36975ed2397d6eb8fb55cb5a58437bd7ca5b10",
+    "files": 9,
+    "downloadBytes": 289598797,
+    "log": ".build/m3-fix-default-source.log"
+  },
+  "review": "docs/reviews/M3-2026-09-24.md; same-session self-review, not independent",
+  "controlledFailureTests": {
+    "simulatedConnectionLoss": "failed transfer, reopen, reuse verified file, complete install",
+    "mirrorCredential": "service plan selects mirror credential reference only; cross-origin redirect strips Authorization and Cookie",
+    "activeDeletion": "HTTP deletion returns busy while simulated generation holds lease; succeeds after lease ends",
+    "twoClientConfiguration": "stale revision is rejected without changing committed credential"
+  },
+  "latestSourceTests": {
+    "passed": 84,
+    "log": ".build/m3-r3-final-tests.log",
+    "releaseBuildAfterReviewFixes": true,
+    "releaseBuildLog": ".build/m3-r3-release-build.log",
+    "realReleasePlanLog": ".build/m3-r3-real-plan.log",
+    "realReleasePullLog": ".build/m3-r3-real-pull.log",
+    "largeLibraryTestLog": ".build/m3-r3-large-library-final.log",
+    "recordOrderTestLog": ".build/m3-r3-order-test.log"
+  }
+}

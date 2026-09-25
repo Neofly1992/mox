@@ -63,8 +63,8 @@
   },
   "review": {
     "implementer_self_test": "passed",
-    "independent_review": "completed; R1 fixed and retested by implementer; independent re-review pending",
-    "user_acceptance": "pending",
+    "independent_review": "completed; R1 targeted code/test recheck closed in M2 specification session; real failure log probe not repeated",
+    "user_acceptance": "passed 2026-09-08: user explicitly confirmed M1 tested OK",
     "same_session_review": "completed"
   },
   "rule_tests": {
@@ -88,5 +88,20 @@
       "code": 1,
       "sensitive_content_absent": true
     }
+  },
+  "m2_entry_recheck": {
+    "date": "2026-09-08",
+    "head": "d581730",
+    "source_commit": "967c6fb68a59ebe6660e1b5e32358247d64d6f99",
+    "rule_tests_passed": 20,
+    "real_test_seconds": 3.082,
+    "real_cancel_wait_seconds": 0.011434708,
+    "cli_passed": true,
+    "cli_cancel_wait_seconds": 0.008948041000166995,
+    "full_stdout_seconds": 5.4360435829999005,
+    "full_stderr_seconds": 0.4217887499999051,
+    "artifact_hashes_match": true,
+    "real_failure_log_probe_repeated": false,
+    "user_acceptance": "passed 2026-09-08"
   }
 }

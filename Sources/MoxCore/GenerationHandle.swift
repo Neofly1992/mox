@@ -23,7 +23,10 @@ public final class GenerationHandle: Sendable {
   public let requestID: UUID
   private let capacity: Int
   private let byteLimit: Int
-  public init(requestID: UUID, capacity: Int = 128, byteLimit: Int = 262_144) {
+  public init(
+    requestID: UUID, capacity: Int = StreamLimits.pendingEvents,
+    byteLimit: Int = StreamLimits.pendingTextBytes
+  ) {
     self.requestID = requestID
     self.capacity = max(1, capacity)
     self.byteLimit = max(1, byteLimit)

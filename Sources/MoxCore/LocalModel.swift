@@ -107,9 +107,7 @@ public struct LocalModel: Sendable, Hashable {
     self.weightBytes = bytes
     self.kvBytesPerToken = Int(kv)
     self.workspaceBytes = max(64 * 1024 * 1024, Int(work))
-    self.id = SHA256.hash(data: Data(directory.path.utf8)).prefix(8).map {
-      String(format: "%02x", $0)
-    }.joined()
+    self.id = LocalModelIdentity.identifier(for: directory)
     self.fingerprint = try Self.fingerprint(directory)
   }
   public func validateUnchanged() throws {

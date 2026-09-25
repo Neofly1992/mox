@@ -84,7 +84,7 @@ private actor MLXLoadedModel: LoadedModel {
         }
         try Task.checkCancellation()
         stage = .generate
-        var decoder = ScalarStreamingDecoder { context.tokenizer.decode(tokenIds: $0) }
+        var decoder = ScalarStreamingDecoder(batchSize: 8) { context.tokenizer.decode(tokenIds: $0) }
         var decodingError: MoxError?
         var first = true
         // Intentionally use the official callback API: 3.31.4's AsyncStream path
@@ -130,7 +130,7 @@ private actor MLXLoadedModel: LoadedModel {
           reason: reason,
           usage: Usage(
             promptTokens: info.promptTokenCount, outputTokens: info.generationTokenCount,
-            prefillSeconds: info.promptTime, decodeSeconds: info.generateTime))
+            prefillSeconds: info.promptTime, decodeSeconds: info.generateTime, peakMemoryBytes: Memory.peakMemory))
       } catch is CancellationError {
         throw CancellationError()
       } catch {

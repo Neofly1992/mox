@@ -1,8 +1,9 @@
 import Foundation
 
-public struct MoxError: Error, Sendable, Equatable, CustomStringConvertible {
-  public enum Code: String, Sendable {
-    case invalidParameters, invalidModel, unsupportedInput, contextLimit, resourceLimit, busy,
+public struct MoxError: Error, Sendable, Equatable, Codable, CustomStringConvertible {
+  public enum Code: String, Codable, Sendable {
+    case connectionLost, protocolViolation, incompatibleService, authenticationFailed, storageFailed, serviceConflict, bodyTooLarge, notFound,
+      invalidParameters, invalidModel, unsupportedInput, contextLimit, resourceLimit, busy,
       queueFull, queueTimeout, shuttingDown, slowConsumer, loadFailed, generationFailed
   }
   public let code: Code
@@ -21,7 +22,7 @@ public enum ContentBlock: Sendable, Equatable {
   case media(assetID: String, mediaType: String)
 }
 public struct Message: Sendable, Equatable {
-  public enum Role: String, Sendable { case system, user, assistant, tool }
+  public enum Role: String, Codable, Sendable { case system, user, assistant, tool }
   public let role: Role
   public let content: [ContentBlock]
   public init(role: Role, content: [ContentBlock]) {
@@ -59,6 +60,7 @@ public struct Sampling: Sendable, Equatable {
   }
 }
 public struct GenerationRequest: Sendable {
+  public static let maximumInputBytes = 1_048_576
   public let id: UUID
   public let messages: [Message]
   public let sampling: Sampling
@@ -78,7 +80,7 @@ public struct GenerationRequest: Sendable {
                 if case .text(let text) = block { return total + text.utf8.count }
                 return total
               })
-        }) <= 1_048_576
+        }) <= Self.maximumInputBytes
     else {
       throw MoxError(.contextLimit, "Input exceeds the 1 MiB safety limit.")
     }
@@ -87,17 +89,22 @@ public struct GenerationRequest: Sendable {
     self.sampling = sampling
   }
 }
-public enum FinishReason: String, Sendable { case stop, length, cancelled }
-public struct Usage: Sendable {
+public enum FinishReason: String, Codable, Sendable {
+  case stop, length, cancelled
+  public var includesTurnInContext: Bool { self == .stop || self == .length }
+}
+public struct Usage: Codable, Sendable {
   public let promptTokens: Int
   public let outputTokens: Int
   public let prefillSeconds: Double
   public let decodeSeconds: Double
-  public init(promptTokens: Int, outputTokens: Int, prefillSeconds: Double, decodeSeconds: Double) {
+  public let peakMemoryBytes: Int?
+  public init(promptTokens: Int, outputTokens: Int, prefillSeconds: Double, decodeSeconds: Double, peakMemoryBytes: Int? = nil) {
     self.promptTokens = promptTokens
     self.outputTokens = outputTokens
     self.prefillSeconds = prefillSeconds
     self.decodeSeconds = decodeSeconds
+    self.peakMemoryBytes = peakMemoryBytes
   }
 }
 public enum GenerationPayload: Sendable {
@@ -133,7 +140,7 @@ public struct ChatSession: Sendable {
       messages: messages + [.init(role: .user, text: prompt)], sampling: sampling)
   }
   public mutating func complete(prompt: String, reply: String, reason: FinishReason) {
-    guard reason != .cancelled else { return }
+    guard reason.includesTurnInContext else { return }
     messages += [.init(role: .user, text: prompt), .init(role: .assistant, text: reply)]
   }
 }

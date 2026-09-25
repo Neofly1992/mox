@@ -53,7 +53,7 @@ G0–G7 是技术验收维度，M1–M4/P1 是交付顺序；相关验证随新�
 
 ## 5. 下一步与当前证据
 
-- 分支 `codex/rewrite`；M2 与 M3 实现、测试和验收材料已整理为本地提交；开始前仍须检查 Git 状态并保护后续修改。2026-09-25 更换网络节点后 GitHub 已可访问，但 HTTPS 无可用凭据，SSH-over-443 也未认证；推送尚未成功。未合并或发布。
+- 分支 `codex/rewrite`；M2 与 M3 实现、测试和验收材料已提交并推送至 `origin/codex/rewrite`（`d0fb959`）；开始前仍须检查 Git 状态并保护后续修改。未合并或发布。
 - **M2：R1–R3 已定向复核通过，完整人工验收仍待用户完成。** 直接核对重试保留草稿、历史分页/迁移、Cocoa/POSIX 安全诊断并运行 6 项定向回归；证据与人工状态见[审查](reviews/M2-2026-09-21.md)及[报告](acceptance/M2.md)。用户仅表示试用看上去没有问题并授权继续 M3。
 - **M3：R1–R3 原缺陷修复已于 2026-09-25 定向复核，仍有验证缺口和人工验收未完成。** [独立审查报告](reviews/M3-independent-2026-09-24.md)记录原问题；[M3 规格](milestones/M3.md)、[技术设计](architecture/TECHNICAL-DESIGN.md)已更新有界库查询与独立存储记录；[M3 交付报告](acceptance/M3.md)及[机器证据](acceptance/M3-evidence.json)记录最新结果。本轮独立复跑 5 个相关测试函数通过（含 3 个损坏参数用例），范围与限制见独立审查报告末节；不等于完整验收。
 - 当前源码全量自动测试 84 项通过（`.build/m3-r3-final-tests.log`），大库最终夹具定向复测通过（`.build/m3-r3-large-library-final.log`）；GUI 真实 HF 预检→下载→安装→详情→聊天及镜像表单保留均通过（`.build/m3-r3-ui-rerun.log`）。此前 HF/ModelScope 两源各 9 文件、289,598,797 字节的精确版本安装及真实 MLX 聊天，以及真实暂停→重启→继续，证据见交付报告。旧 SwiftData 库用户默认来源迁移与重开记录顺序已验证。

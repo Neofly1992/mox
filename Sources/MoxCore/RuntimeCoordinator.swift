@@ -5,9 +5,11 @@ import OSLog
 public struct BackendResult: Sendable {
   public let reason: FinishReason
   public let usage: Usage?
-  public init(reason: FinishReason, usage: Usage? = nil) {
+  public let matchedStopSequence: String?
+  public init(reason: FinishReason, usage: Usage? = nil, matchedStopSequence: String? = nil) {
     self.reason = reason
     self.usage = usage
+    self.matchedStopSequence = matchedStopSequence
   }
 }
 /// Implementations return only after all backend/GPU work has stopped.
@@ -144,6 +146,7 @@ public actor RuntimeCoordinator {
       handle.emit(.phase("prefill"))
       stage = .generate
       let result = try await slot.loaded.generate(request, output: handle)
+      if let sequence = result.matchedStopSequence { handle.emit(.matchedStopSequence(sequence)) }
       if let usage = result.usage {
         handle.emit(.usage(usage))
         logger.info(

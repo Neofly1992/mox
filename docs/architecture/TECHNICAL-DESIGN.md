@@ -211,9 +211,9 @@ ResolvedGenerationRequest
 
 参数优先级：显式请求 > 模型设置 > 有效全局设置 > 产品默认。单次解析后冻结；GUI 和 CLI 请求沿相同规则。初始 max output 默认 2048，服务上限建议 8192，但同时受模型 context 和预算限制；这些是产品默认而不是所有模型能力。temperature/topP 等做有限数与范围验证，未知/不支持的语义参数明确拒绝。
 
-工具 schema 保留 JSON 结构、调用 ID 和消息角色；工具执行不在 Mox 推理服务内发生。外部 agent 返回 toolResult 后再发下一次生成。
+工具 schema 保留 JSON 结构、调用 ID 和消息角色；工具执行不在 Mox 推理服务内发生。外部 agent 返回 toolResult 后再发下一次生成。`GenerationRequest` 在领域边界校验轮次：有待返回的调用时，后续消息必须立即提供对应结果，不得跨越无关 user/assistant/system 消息；多个 OpenAI `tool` 消息可连续收齐，Anthropic 的多个结果在紧随调用的同一 user 消息中收齐，且可与文本块混排。
 
-事件：
+设计阶段事件示意；M4 的实际领域粒度在下段锁定：
 
 ```text
 accepted(requestID, sequence, resolvedModel)
@@ -226,6 +226,8 @@ failed(code, safeMessage)
 ```
 
 每请求序号递增，只出现一个语义终态。transport 中断由 client 归类 connectionLost，不能等同 finished。API consumer 断连取消该生成；持久下载 operation 与观察连接分离，断开进度页面不自动删除任务。
+
+M4 实际 `GenerationPayload` 为 `phase`、`promptTokens`、`contentDelta`、完整的 `toolCall(id,name,argumentsJSON)`、`matchedStopSequence`、`usage`、`finished`、`failed`。MLX adapter 使用官方 `ToolCallProcessor`，只在完整解析 JSON 对象后产生工具事件，并保持普通文本与工具调用的生成顺序；OpenAI/Anthropic 编码器从此完整事件切成各自可拼接的流式参数片段。不会对外承诺尚未验证的上游逐 token 工具参数。Qwen3 通过上游模板 `enable_thinking=false` 生成普通文本与工具调用；服务准入仅放行与真机验证的 `mlx-community/Qwen3-0.6B-4bit` 固定 revision、权重 SHA-256 和 tokenizer SHA-256 匹配的受管安装，MLX adapter 另检查架构。未附受管清单的导入引用和其他 Qwen3 变体均需先取得独立能力证据。领域有序块由 adapter 按相邻同类块合并并依序映射为上游 `Chat.Message`，不得将跨工具结果的文字前移。
 
 生成会话 handle 提供事件消费、cancel、waitUntilStopped。采用结构化 task ownership；不暴露一条无错误、无完成信息的 AsyncStream<String>。生产事件不丢，慢消费者超过有界缓冲/写超时明确失败。UI 可合并刷新，不能丢掉持久消息内容。
 
@@ -242,11 +244,13 @@ failed(code, safeMessage)
 
 公开推理 listener：`/v1/models`、`/v1/chat/completions`、`/v1/messages`，加最小 health。第一版不实现 legacy completions/Responses API/embeddings；不因路由名字存在就返回看似支持的空结果。内部 rawPrompt 是独立语义，可留到具体入口需要时实现。
 
-公开支持范围：文本多轮、system、流式/非流式、正确 sampling/max_tokens/stop、工具定义/选择/往返、真实 usage 与停止原因。模型能力限制仍可拒绝 tools；不承诺任意 MLX 模型都能用于任意 agent。OpenAI/Anthropic wire DTO 各自独立，在 boundary 映射到领域请求。
+M4 公开协议的具体支持/拒绝字段、wire 事件、错误及测试矩阵以 [M4 规格](../milestones/M4.md)为权威。本层固定跨模块边界：OpenAI/Anthropic DTO 仅在协议适配层；领域为有序文本/工具块和独立媒体边界，Core 是准入、生成、stop、usage、取消与 lease 的唯一业务权威；MLX adapter 在有界输出内接入锁定 SDK 工具模板/解析。私有管理凭据与持久公开 API key 分离，两个 listener 都仅绑定 loopback，公开默认关闭；公开路由不能访问管理用例。GUI/CLI 控制同一服务实例，不复制推理逻辑。模型工具能力经实际验证后才对请求开放，不承诺任意已安装模型均可工具调用。
+
+公共 listener 的请求体读取与连接所有权归 Server：未消费完 body 就拒绝时，错误响应写完立即关闭 channel，不让 HTTP keep-alive 继续等待无限 body；读取有绝对期限，HTTP/1 空闲连接有期限。协议适配只决定错误内容，领域校验不接触 channel 或 HTTP DTO。具体期限与真 socket 证据见 M4 规格及验收报告。
 
 外部 agent 集成验收必须记录该客户端实际使用的协议和端点；不能把 Chat Completions 可用等同于所有客户端（包括需要 Responses API 的配置）可用。新增端点由实际需求决定，不能悄悄降级请求。
 
-错误类与状态：输入/不支持语义 400，认证 401/403，未安装 404，状态冲突 409，body 超限 413，队列满 429，runtime unavailable 503，意外内部错误 500；内存单任务无法容纳使用明确 resource_exhausted code 和稳定映射。SSE headers 发出前做可完成的验证；发出后使用该协议错误事件，不再写第二个 HTTP 响应。
+错误类与状态：输入/不支持语义 400，认证 401/403，未安装 404，状态冲突 409，body 超限 413，队列满 429，runtime unavailable 503，意外内部错误 500；内存单任务无法容纳使用明确 resource_exhausted code 和稳定映射。SSE headers 发出前做可完成的验证；发出后按对应协议发错误事件并关闭，不再写第二个 HTTP 响应或成功终态。
 
 所有 body 限制在聚合之前执行，初值 16 MiB 文本请求；SSE 写入 await 完成并最终 flush/end。每条长请求登记 task 并在 disconnect 取消；shutdown/drain 全部可等待。协议序列必须按官方规范和真实 SDK fixtures 验证，此文的领域事件不替代 wire spec。
 

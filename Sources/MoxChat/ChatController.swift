@@ -576,6 +576,7 @@ private actor ChatRun {
           value.text += text
           document.append(text)
           value.segments = document.values
+        case .promptTokens, .toolCall, .matchedStopSequence: break
         case .usage(let usage): value.usage = usage
         case .finished(let reason): terminalStatus = reason.rawValue
         case .failed(let error):

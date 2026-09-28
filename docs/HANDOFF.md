@@ -1,6 +1,6 @@
 # Mox 续接入口
 
-更新：2026-09-25。新会话先读此文，再按任务读对应规格；无需旧会话上下文。
+更新：2026-09-28。新会话先读此文，再按任务读对应规格；无需旧会话上下文。
 
 ## 1. 当前状态
 
@@ -28,7 +28,7 @@ HF/ModelScope 和同协议自定义来源、镜像；精确 revision 安装与�
 
 ## 3. 阅读顺序与文档职责
 
-所有实现会话先遵循 [CONTRIBUTING](../CONTRIBUTING.md) 的入口、自测、出口和人工验收流程。规格/报告模板位于 `docs/templates/`；[发布计划](RELEASE-PLAN.md)、[M1 详细规格](milestones/M1.md)、M2 详细规格及 M3–M4 概要已建立。[M1 交付报告](acceptance/M1.md)已建立；[M2 交付报告](acceptance/M2.md)提供最终证据与六个人工验收场景。
+所有实现会话先遵循 [CONTRIBUTING](../CONTRIBUTING.md) 的入口、自测、出口和人工验收流程。规格/报告模板位于 `docs/templates/`；[发布计划](RELEASE-PLAN.md)、[M1 详细规格](milestones/M1.md)、M2/M3 详细规格及 M4 可实施规格已建立。[M1 交付报告](acceptance/M1.md)已建立；[M2 交付报告](acceptance/M2.md)提供最终证据与六个人工验收场景。
 
 1. [技术方案](architecture/TECHNICAL-DESIGN.md)：写代码前必读，模块边界、状态/协议/存储契约、G0–G7 验收。具体依赖版本仍需实施时核验锁定。
 2. [产品契约](../ARCHITECTURE-DRAFT.md)：理解功能与默认行为；产品问题查这里。
@@ -53,12 +53,12 @@ G0–G7 是技术验收维度，M1–M4/P1 是交付顺序；相关验证随新�
 
 ## 5. 下一步与当前证据
 
-- 分支 `codex/rewrite`；M2 与 M3 实现、测试和验收材料已提交并推送至 `origin/codex/rewrite`（`d0fb959`）；开始前仍须检查 Git 状态并保护后续修改。未合并或发布。
-- **M2：R1–R3 已定向复核通过，完整人工验收仍待用户完成。** 直接核对重试保留草稿、历史分页/迁移、Cocoa/POSIX 安全诊断并运行 6 项定向回归；证据与人工状态见[审查](reviews/M2-2026-09-21.md)及[报告](acceptance/M2.md)。用户仅表示试用看上去没有问题并授权继续 M3。
-- **M3：R1–R3 原缺陷修复已于 2026-09-25 定向复核，仍有验证缺口和人工验收未完成。** [独立审查报告](reviews/M3-independent-2026-09-24.md)记录原问题；[M3 规格](milestones/M3.md)、[技术设计](architecture/TECHNICAL-DESIGN.md)已更新有界库查询与独立存储记录；[M3 交付报告](acceptance/M3.md)及[机器证据](acceptance/M3-evidence.json)记录最新结果。本轮独立复跑 5 个相关测试函数通过（含 3 个损坏参数用例），范围与限制见独立审查报告末节；不等于完整验收。
-- 当前源码全量自动测试 84 项通过（`.build/m3-r3-final-tests.log`），大库最终夹具定向复测通过（`.build/m3-r3-large-library-final.log`）；GUI 真实 HF 预检→下载→安装→详情→聊天及镜像表单保留均通过（`.build/m3-r3-ui-rerun.log`）。此前 HF/ModelScope 两源各 9 文件、289,598,797 字节的精确版本安装及真实 MLX 聊天，以及真实暂停→重启→继续，证据见交付报告。旧 SwiftData 库用户默认来源迁移与重开记录顺序已验证。
-- 当前 Release App `.build/m3/Release/Mox.app`、CLI `.build/m3-worker/Release/mox`，buildID `mox-m3-e5a062f7623cd09d7fdd853905f38c1db243fed48e7142ea3a1bbaeac602f447`；内嵌 worker 与 CLI 版本一致（`.build/m3-r3-release-build.log`）。真实 HF Release 预检与无现成服务的 CLI `models pull` 安装通过（`.build/m3-r3-real-plan.log`、`.build/m3-r3-real-pull.log`）。GUI 自动测试在匹配的 Debug 业务源码与 worker 上通过；Release UI 未单独自动跑。
-- **下一步：可开始 M4 规格细化；编码入口先收尾 M3 可自动完成的验证，再记录用户验收。** 外部已有服务的 CLI 生命周期、真实私有镜像、物理断网、真实 MLX 推理与删除竞态、多进程双客户端、macOS 15 真机尚未实测；有相应可控边界测试的项目见交付报告。不要把这些写成已通过。M2 完整人工验收仍待用户完成；M4 实现尚未开始；未合并或发布。
+- 分支 `codex/rewrite`。用户于 2026-09-28 授权实施 M4，并随后授权将本轮工作 commit、push 到当前远端分支；准确提交与远端状态以 Git 为准。开始前已有的 `docs/reviews/M3-independent-2026-09-24.md` 未提交复核补记未纳入 M4 提交，勿覆盖。新会话仍须先看 Git 状态与实际源码。
+- M4 本机公共 API、独立 Keychain key、GUI/CLI 控制、两协议严格 DTO/SSE、真实工具事件与 Qwen3 模板、可取消的有界流已实现。同会话审查及 2026-09-28 独立审查的 R1/R2 已由实施者修复并自测，尚待独立复核；当前 Release App `.build/m4/Release/Mox.app`，buildID `mox-m4-286ce3dd39dd651231aa0a02ddd04279a0f85a494cbd90258bb17fb702f36684`。工具能力仅对固定 revision 及权重/tokenizer 摘要匹配的受管 Qwen3 安装开放；导入引用不能只凭 `model_type` 获得能力。完整要求与证据见 [M4 规格](milestones/M4.md)、[M4 验收报告](acceptance/M4.md)，跨模块边界见[技术设计 §7–§10](architecture/TECHNICAL-DESIGN.md)。不要从 HANDOFF 推导具体字段或状态规则。
+- 官方 `openai==3.19.2`、`anthropic==1.8.0` 已对新 Release worker 运行文本、流式、固定 Qwen3 的客户端纯函数工具往返、流式工具参数拼接、Anthropic 错误结果续答和真 HTTP 失败路径；可复跑入口为 `scripts/verify-m4-sdk.py`。独立审查修复后全量普通 Swift 测试四组 7+49+10+33 项无失败，3 项条件测试按标记跳过；MLX 实跑 3 项的证据来自修复前，所触 MLX 路径未变。新 Release 对未终止 body 的 401/403/413、读取期限、非法跨轮工具历史 400 与后续正常请求均真 HTTP 通过。Release 三项 UI 测试证据来自本次修复前，未当作新构建复跑。命令、日志与限制见 [M4 报告](acceptance/M4.md)。M3 自动入口检查证据仍在报告，勿把历史 M3 R1–R3 重审或将建议写成已运行。
+- M2、M3、M4 的完整用户体验验收尚未获得用户明确反馈。真实私有镜像与 macOS 15 真机依赖外部资源，报告为 BLOCKED；不让用户代做基础正确性测试。M4 本机原型边界不含 Responses、Pi、容器 agent、多模态推理、签名公证或 Homebrew 发布。
+- 2026-09-28 [M4 独立审查](reviews/M4-independent-2026-09-28.md)确认 R1 提前拒绝连接未释放、R2 工具结果跨轮接受；本会话已修复、增加两协议负向 fixture 与真 socket 探针，并在新 Release 上自测通过。原独立审查记录不改成通过；M4 当前为**待独立复核及人工验收**。
+- **下一步**：由独立会话定向复核 R1/R2 的新源码及真 socket 证据，再完成 M4 报告末节的用户人工体验场景并记录明确结论。用户当前先将源码推到 GitHub，尚未要求打正式发布标签或分发二进制；签名、公证与 Homebrew 不是源码推送的前置条件。
 
 ## 6. 交接维护
 

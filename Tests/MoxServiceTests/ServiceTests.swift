@@ -7,6 +7,7 @@ import MoxDomain
 import MoxPersistence
 import MoxProtocol
 import MoxServer
+import Security
 import SwiftData
 import Testing
 
@@ -93,6 +94,40 @@ func serviceRequest() throws -> GenerationRequest {
   try GenerationRequest(
     messages: [.init(role: .user, text: "fixture-private-prompt")],
     sampling: Sampling(maxTokens: 128))
+}
+
+@Test func concurrentPublicAPITogglesKeepStoredAndLiveStateAligned() async throws {
+  let root = try temporaryRoot()
+  let identity = UUID().uuidString
+  defer {
+    let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: "dev.mox.public-api",
+      kSecAttrAccount as String: "dev.mox.public-api.\(identity)"]
+    SecItemDelete(query as CFDictionary)
+    try? FileManager.default.removeItem(at: root)
+  }
+  let store = try await RuntimeStore.open(root: root)
+  let downloads = DownloadManager(persistence: store,
+    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")),
+    state: try await store.readLibrary())
+  let runtime = RuntimeCoordinator(backend: ServiceBackend(),
+    policy: .init(budgetBytes: 512 * 1024 * 1024))
+  let service = InferenceService(identity: .init(pid: getpid(), uid: getuid(),
+    rootIdentity: identity, ownership: .foreground), token: try ServiceFiles.token(),
+    runtime: runtime, downloads: downloads)
+  let manager = PublicAPIManager(service: service, downloads: downloads, rootIdentity: identity)
+  await service.attachPublicAPI(manager)
+  for _ in 0..<4 {
+    let enable = Task { try await manager.setEnabled(true) }
+    let disable = Task { try await manager.setEnabled(false) }
+    _ = try await enable.value
+    _ = try await disable.value
+    let saved = await downloads.snapshot().configuration.publicAPIEnabled
+    let live = await manager.status()
+    #expect(live.enabled == saved)
+    #expect(live.enabled == (live.endpoint != nil))
+  }
+  await service.shutdown()
 }
 
 private final class CredentialProbe: ModelSourceFactory, @unchecked Sendable {

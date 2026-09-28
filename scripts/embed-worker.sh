@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-milestone="${MOX_BUILD_MILESTONE:-m2}"
+milestone="${MOX_BUILD_MILESTONE:-m4}"
 source_dir="$SRCROOT/.build/${milestone}-worker/$CONFIGURATION"
 helpers="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
 target_dir="$helpers/MoxWorker.app/Contents"

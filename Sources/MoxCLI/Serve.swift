@@ -49,6 +49,10 @@ struct Serve: AsyncParsableCommand {
     let service = InferenceService(
       identity: identity, token: token, runtime: runtime,
       downloads: downloads, sources: sourceFactory)
+    let publicAPI = PublicAPIManager(service: service, downloads: downloads,
+      rootIdentity: files.rootIdentity)
+    await service.attachPublicAPI(publicAPI)
+    await publicAPI.restore()
     let stop = AsyncStream<MoxError?>.makeStream(bufferingPolicy: .bufferingNewest(1))
     var signals: [DispatchSourceSignal] = []
     signal(SIGPIPE, SIG_IGN)

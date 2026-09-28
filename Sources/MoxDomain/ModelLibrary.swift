@@ -140,6 +140,7 @@ public struct ModelConfiguration: Codable, Sendable, Equatable {
   public var revision: UInt64
   public var defaultRegistryID: UUID
   public var defaultProvenance: DefaultProvenance
+  public var publicAPIEnabled: Bool
   public var registries: [ModelRegistry]
   public func preferredRegistry(for provider: ModelProvider? = nil) -> ModelRegistry? {
     let selected = registries.first { $0.id == defaultRegistryID }
@@ -148,17 +149,19 @@ public struct ModelConfiguration: Codable, Sendable, Equatable {
     return registries.first { $0.provider == provider }
   }
   public init(revision: UInt64 = 0, defaultRegistryID: UUID, registries: [ModelRegistry],
-    defaultProvenance: DefaultProvenance = .product
+    defaultProvenance: DefaultProvenance = .product, publicAPIEnabled: Bool = false
   ) {
     self.revision = revision; self.defaultRegistryID = defaultRegistryID
     self.registries = registries; self.defaultProvenance = defaultProvenance
+    self.publicAPIEnabled = publicAPIEnabled
   }
-  private enum CodingKeys: String, CodingKey { case revision, defaultRegistryID, registries, defaultProvenance }
+  private enum CodingKeys: String, CodingKey { case revision, defaultRegistryID, registries, defaultProvenance, publicAPIEnabled }
   public init(from decoder: Decoder) throws {
     let values = try decoder.container(keyedBy: CodingKeys.self)
     revision = try values.decode(UInt64.self, forKey: .revision)
     defaultRegistryID = try values.decode(UUID.self, forKey: .defaultRegistryID)
     registries = try values.decode([ModelRegistry].self, forKey: .registries)
+    publicAPIEnabled = try values.decodeIfPresent(Bool.self, forKey: .publicAPIEnabled) ?? false
     defaultProvenance = try values.decodeIfPresent(DefaultProvenance.self, forKey: .defaultProvenance)
       ?? (defaultRegistryID == UUID(uuidString: "2C9C1884-5ED1-4160-B4DC-B89C52C7FE8E")! ? .product : .user)
   }

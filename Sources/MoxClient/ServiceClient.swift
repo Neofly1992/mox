@@ -32,6 +32,14 @@ public final class ServiceClient: Sendable {
     return value
   }
   public func state() async throws -> ServiceState { try await json("/state") }
+  public func publicAPIStatus() async throws -> PublicAPIStatus { try await json("/public-api") }
+  public func setPublicAPIEnabled(_ enabled: Bool) async throws -> PublicAPIStatus {
+    try await json("/public-api", method: "POST", body: Wire.encode(PublicAPIChange(enabled: enabled)))
+  }
+  public func publicAPIKey() async throws -> PublicAPIKey { try await json("/public-api/key") }
+  public func rotatePublicAPIKey() async throws -> PublicAPIKey {
+    try await json("/public-api/rotate", method: "POST")
+  }
   public func cancel(_ id: UUID) async throws -> RequestState {
     try await json("/generations/\(id)/cancel", method: "POST")
   }

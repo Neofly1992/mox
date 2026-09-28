@@ -106,6 +106,9 @@ public final class GenerationHandle: Sendable {
   }
   private static func size(_ payload: GenerationPayload) -> Int {
     if case .contentDelta(let text) = payload { return text.utf8.count }
+    if case .toolCall(let id, let name, let arguments) = payload {
+      return id.utf8.count + name.utf8.count + arguments.utf8.count
+    }
     return 0
   }
   public struct Events: AsyncSequence, Sendable {

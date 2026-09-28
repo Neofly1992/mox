@@ -9,8 +9,9 @@ struct WorkspaceView: View {
     case models = "模型"
     case testing = "测试"
     case downloads = "下载任务"
+    case api = "本机 API"
     var id: Self { self }
-    var symbol: String { self == .models ? "square.stack.3d.up" : self == .downloads ? "arrow.down.circle" : "flask" }
+    var symbol: String { self == .models ? "square.stack.3d.up" : self == .downloads ? "arrow.down.circle" : self == .api ? "network" : "flask" }
   }
   @Bindable var chat: ChatController
   @Binding var section: Section?
@@ -38,7 +39,7 @@ struct WorkspaceView: View {
               .clipShape(RoundedRectangle(cornerRadius: 8))
           }
             .buttonStyle(.plain)
-            .accessibilityIdentifier(item == .models ? "modelsNavigation" : item == .downloads ? "downloadsNavigation" : "testingNavigation")
+            .accessibilityIdentifier(item == .models ? "modelsNavigation" : item == .downloads ? "downloadsNavigation" : item == .api ? "apiNavigation" : "testingNavigation")
         }
         Spacer(minLength: 0)
       }.padding(8)
@@ -51,6 +52,7 @@ struct WorkspaceView: View {
       case .models: models
       case .testing: ChatView(chat: chat)
       case .downloads: downloads
+      case .api: PublicAPIView(chat: chat)
       }
     }
     .task {

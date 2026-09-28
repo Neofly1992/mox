@@ -488,6 +488,43 @@ extension MoxUITests {
 }
 
 extension MoxUITests {
+  @MainActor func testM4APIControls() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("mox-m4-api-ui-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let app = XCUIApplication()
+    app.launchEnvironment["MOX_DATA_ROOT"] = root.path
+    app.launch()
+    let navigation = app.descendants(matching: .any)["apiNavigation"].firstMatch
+    XCTAssertTrue(navigation.waitForExistence(timeout: 30))
+    navigation.click()
+    let toggle = app.buttons["togglePublicAPI"]
+    XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+    toggle.click()
+    XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "http://127.0.0.1:")).firstMatch
+      .waitForExistence(timeout: 20))
+    XCTAssertTrue(app.buttons["显示密钥"].exists)
+    app.buttons["显示密钥"].click()
+    let copyKey = app.buttons["复制密钥"]
+    XCTAssertTrue(copyKey.waitForExistence(timeout: 10))
+    let rotate = Process()
+    var products = Bundle(for: MoxUITests.self).bundleURL
+    for _ in 0..<4 { products.deleteLastPathComponent() }
+    rotate.executableURL = products.appendingPathComponent(
+      "Mox.app/Contents/Helpers/MoxWorker.app/Contents/MacOS/mox")
+    rotate.arguments = ["api", "rotate", "--data-root", root.path]
+    rotate.standardOutput = FileHandle.nullDevice
+    try rotate.run()
+    rotate.waitUntilExit()
+    XCTAssertEqual(rotate.terminationStatus, 0)
+    let oldKeyCleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
+      object: copyKey)
+    XCTAssertEqual(XCTWaiter.wait(for: [oldKeyCleared], timeout: 15), .completed)
+    toggle.click()
+    XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "value == %@", "已关闭")).firstMatch
+      .waitForExistence(timeout: 20))
+    app.terminate()
+  }
+
   @MainActor func testM3ConfiguredMirrorSurvivesAcquireSheet() throws {
     let keyboard = try useABCKeyboard()
     defer { TISSelectInputSource(keyboard) }
@@ -539,7 +576,7 @@ extension MoxUITests {
     XCTAssertTrue(downloads.waitForExistence(timeout: 30))
     downloads.click()
     let installed = app.descendants(matching: .any)["downloadPhase-installed"].firstMatch
-    XCTAssertTrue(installed.waitForExistence(timeout: 120), "Real HF model should install")
+    XCTAssertTrue(installed.waitForExistence(timeout: 240), "Real HF model should install")
     app.descendants(matching: .any)["modelsNavigation"].firstMatch.click()
     let model = app.buttons["installedModelDetails"].firstMatch
     XCTAssertTrue(model.waitForExistence(timeout: 30))
@@ -553,9 +590,24 @@ extension MoxUITests {
     composer.click()
     composer.typeText("Say hello briefly.")
     app.buttons["sendMessage"].click()
-    XCTAssertTrue(app.buttons["stopGeneration"].waitForExistence(timeout: 30))
-    XCTAssertTrue(app.buttons["sendMessage"].waitForExistence(timeout: 120))
-    XCTAssertTrue(app.buttons["retryReply"].isEnabled)
+    let completed = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "enabled == true"), object: app.buttons["retryReply"])
+    XCTAssertEqual(XCTWaiter.wait(for: [completed], timeout: 120), .completed)
+    let finalStatus = app.staticTexts["currentReplyStatus"]
+    XCTAssertTrue(finalStatus.waitForExistence(timeout: 10))
+    XCTAssertTrue(["已完成", "达到输出上限"].contains(finalStatus.value as? String ?? ""))
+    let reply = app.descendants(matching: .any)["replyText"].firstMatch
+    XCTAssertTrue(reply.waitForExistence(timeout: 10), "Model reply should contain generated text")
+    XCTAssertFalse((reply.value as? String ?? reply.label).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    XCTAssertTrue(app.buttons["sendMessage"].exists)
+    let api = app.descendants(matching: .any)["apiNavigation"].firstMatch
+    XCTAssertTrue(api.waitForExistence(timeout: 10))
+    api.click()
+    let toggle = app.buttons["togglePublicAPI"]
+    XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+    toggle.click()
+    XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "http://127.0.0.1:")).firstMatch
+      .waitForExistence(timeout: 20))
     app.terminate()
   }
 }

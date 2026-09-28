@@ -84,6 +84,7 @@ public enum ArtifactValidation {
     git.update(data: Data("blob \(file.bytes)\0".utf8))
     var count: Int64 = 0
     while let chunk = try handle.read(upToCount: hashChunkBytes), !chunk.isEmpty {
+      try Task.checkCancellation()
       count += Int64(chunk.count)
       guard count <= file.bytes else {
         throw MoxError(.invalidModel, "Artifact file changed during verification.")

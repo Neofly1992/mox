@@ -42,7 +42,8 @@ public struct MLXBackend: RuntimeBackend {
       Logger(subsystem: "dev.mox", category: "runtime").info(
         "model=\(model.id, privacy: .public) phase=warmup elapsed=\(String(describing: warmupStart.duration(to: .now)), privacy: .public)"
       )
-      return MLXLoadedModel(container: container, contextSize: model.contextSize)
+      return MLXLoadedModel(container: container, contextSize: model.contextSize,
+        toolCapable: model.modelType == "qwen3")
     } catch {
       Stream().synchronize()
       Memory.clearCache()
@@ -50,19 +51,28 @@ public struct MLXBackend: RuntimeBackend {
     }
   }
 }
-private actor MLXLoadedModel: LoadedModel {
+actor MLXLoadedModel: LoadedModel {
   private var container: ModelContainer?
   private let contextSize: Int
-  init(container: ModelContainer, contextSize: Int) {
+  private let toolCapable: Bool
+  init(container: ModelContainer, contextSize: Int, toolCapable: Bool) {
     self.container = container
     self.contextSize = contextSize
+    self.toolCapable = toolCapable
   }
   func generate(_ request: GenerationRequest, output: GenerationHandle) async throws
     -> BackendResult
   {
     guard let container else { throw MoxError(.generationFailed, "Model has been unloaded.") }
-    let messages: [[String: any Sendable]] = try request.messages.map {
-      ["role": $0.role.rawValue, "content": try $0.text()]
+    guard request.toolChoice == .none || toolCapable else {
+      throw MoxError(.unsupportedInput, "This model has no verified tool-call capability.")
+    }
+    let toolSpecs: [ToolSpec] = try request.tools.map { tool in
+      let parameters = try JSONDecoder().decode(JSONValue.self, from: Data(tool.parametersJSON.utf8))
+      return ["type": "function", "function": [
+        "name": tool.name, "description": tool.description ?? "",
+        "parameters": Self.nativeValue(parameters),
+      ] as [String: any Sendable]]
     }
     let limit = contextSize
     return try await container.perform { (context: ModelContext) in
@@ -73,8 +83,11 @@ private actor MLXLoadedModel: LoadedModel {
       var stage = BackendFailure.Stage.prepare
       do {
         try Task.checkCancellation()
+        let messages = try Self.chatMessages(request.messages)
         let input = try await context.processor.prepare(
-          input: UserInput(prompt: .messages(messages)))
+          input: UserInput(chat: messages,
+            tools: request.toolChoice == .auto ? toolSpecs : nil,
+            additionalContext: toolCapable ? ["enable_thinking": false] : nil))
         let promptTokens = input.text.tokens.size
         guard promptTokens <= 8192, promptTokens + request.sampling.maxTokens <= limit else {
           throw MoxError(
@@ -83,10 +96,56 @@ private actor MLXLoadedModel: LoadedModel {
           )
         }
         try Task.checkCancellation()
+        output.emit(.promptTokens(promptTokens))
         stage = .generate
         var decoder = ScalarStreamingDecoder(batchSize: 8) { context.tokenizer.decode(tokenIds: $0) }
+        var stopFilter = StopSequenceFilter(request.stopSequences)
+        let processor = request.toolChoice == .auto
+          ? ToolCallProcessor(format: context.configuration.toolCallFormat ?? .json,
+              tools: toolSpecs) : nil
         var decodingError: MoxError?
         var first = true
+        var emittedCalls = 0
+        func emitCall(_ call: ToolCall) {
+          guard request.tools.contains(where: { $0.name == call.function.name }),
+            let arguments = try? String(data: JSONEncoder().encode(call.function.arguments), encoding: .utf8)
+          else { decodingError = MoxError(.generationFailed, "Model produced an invalid tool call."); return }
+          let id = "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+          if !output.emit(.toolCall(id: id, name: call.function.name, arguments: arguments)) {
+            decodingError = MoxError(.slowConsumer, "Output consumer is too slow.")
+          }
+        }
+        func emitVisible(_ visible: String) {
+          if let processor {
+            // 3.31.4's processor does not rescan a chunk after a different '<...>' tag.
+            // Scalar-sized input lets it recognize a later <tool_call> without replacing
+            // the upstream parser or changing the bounded callback transport.
+            var ordinary = ""
+            for scalar in visible.unicodeScalars {
+              if let part = processor.processChunk(String(scalar)) { ordinary += part }
+              while emittedCalls < processor.toolCalls.count {
+                if !ordinary.isEmpty, !output.emit(.contentDelta(ordinary)) {
+                  decodingError = MoxError(.slowConsumer, "Output consumer is too slow.")
+                }
+                ordinary = ""
+                if decodingError != nil { return }
+                emitCall(processor.toolCalls[emittedCalls])
+                emittedCalls += 1
+                if decodingError != nil { return }
+              }
+            }
+            if ordinary.contains("<tool_call>") {
+              decodingError = MoxError(.generationFailed, "Model produced an invalid tool call.")
+              return
+            }
+            if !ordinary.isEmpty, !output.emit(.contentDelta(ordinary)) {
+              decodingError = MoxError(.slowConsumer, "Output consumer is too slow.")
+            }
+          } else if !visible.isEmpty, !output.emit(.contentDelta(visible)) {
+            decodingError = MoxError(.slowConsumer, "Output consumer is too slow.")
+          }
+        }
+        func emitText(_ decoded: String) { emitVisible(stopFilter.accept(decoded)) }
         // Intentionally use the official callback API: 3.31.4's AsyncStream path
         // allocates an unbounded intermediary. No custom sampler or token loop.
         let info: GenerateCompletionInfo = try MLXLMCommon.generate(
@@ -103,7 +162,8 @@ private actor MLXLoadedModel: LoadedModel {
             }
             do {
               let text = try decoder.append(token)
-              if !text.isEmpty, !output.emit(.contentDelta(text)) { return .stop }
+              emitText(text)
+              if decodingError != nil || stopFilter.matched != nil { return .stop }
             } catch let error as MoxError {
               decodingError = error
               return .stop
@@ -115,22 +175,40 @@ private actor MLXLoadedModel: LoadedModel {
           })
         if let decodingError { throw decodingError }
         if !output.isCancelled, !Task.isCancelled {
-          let tail = try decoder.finish()
-          if !tail.isEmpty { output.emit(.contentDelta(tail)) }
+          emitText(try decoder.finish())
+          emitVisible(stopFilter.finish())
+          if let decodingError { throw decodingError }
+          if let residual = processor?.processEOS(returnBufferedText: true), !residual.isEmpty {
+            guard !residual.contains("<tool_call>") else {
+              throw MoxError(.generationFailed, "Model produced an incomplete tool call.")
+            }
+            if !output.emit(.contentDelta(residual)) {
+              throw MoxError(.slowConsumer, "Output consumer is too slow.")
+            }
+          }
+          if let processor {
+            while emittedCalls < processor.toolCalls.count {
+              emitCall(processor.toolCalls[emittedCalls])
+              emittedCalls += 1
+              if let decodingError { throw decodingError }
+            }
+          }
         }
         let reason: FinishReason
-        switch info.stopReason {
+        if processor?.toolCalls.isEmpty == false { reason = .toolCalls }
+        else if stopFilter.matched != nil { reason = .stopSequence }
+        else { switch info.stopReason {
         case .stop: reason = .stop
         case .length: reason = .length
         case .cancelled: reason = .cancelled
-        }
+        } }
         Logger(subsystem: "dev.mox", category: "runtime").info(
           "request=\(request.id.uuidString, privacy: .public) peak_mlx_bytes=\(Memory.peakMemory)")
         return BackendResult(
-          reason: reason,
-          usage: Usage(
+          reason: reason, usage: Usage(
             promptTokens: info.promptTokenCount, outputTokens: info.generationTokenCount,
-            prefillSeconds: info.promptTime, decodeSeconds: info.generateTime, peakMemoryBytes: Memory.peakMemory))
+            prefillSeconds: info.promptTime, decodeSeconds: info.generateTime, peakMemoryBytes: Memory.peakMemory),
+          matchedStopSequence: stopFilter.matched)
       } catch is CancellationError {
         throw CancellationError()
       } catch {
@@ -142,5 +220,61 @@ private actor MLXLoadedModel: LoadedModel {
     container = nil
     Stream().synchronize()
     Memory.clearCache()
+  }
+  static func chatMessages(_ messages: [MoxDomain.Message]) throws -> [Chat.Message] {
+    try messages.flatMap { message -> [Chat.Message] in
+      var result: [Chat.Message] = []
+      var text = ""
+      var calls: [ToolCall] = []
+      func flushText() {
+        guard !text.isEmpty else { return }
+        switch message.role {
+        case .system: result.append(.system(text))
+        case .user: result.append(.user(text))
+        case .assistant: result.append(.assistant(text))
+        case .tool: break
+        }
+        text = ""
+      }
+      func flushCalls() {
+        guard !calls.isEmpty else { return }
+        result.append(.assistant("", toolCalls: calls))
+        calls = []
+      }
+      for block in message.content {
+        switch block {
+        case .text(let value):
+          flushCalls()
+          text += value
+        case .toolCall(let id, let name, let arguments):
+          guard message.role == .assistant else {
+            throw MoxError(.unsupportedInput, "Tool calls require an assistant message.")
+          }
+          flushText()
+          let object = try JSONDecoder().decode([String: JSONValue].self, from: Data(arguments.utf8))
+          calls.append(ToolCall(function: .init(name: name, arguments: object), id: id))
+        case .toolResult(let id, let value, let isError):
+          flushText()
+          flushCalls()
+          result.append(.tool(isError ? "Error: \(value)" : value, id: id))
+        case .media:
+          throw MoxError(.unsupportedInput, "Media input is not available in M4.")
+        }
+      }
+      flushText()
+      flushCalls()
+      return result
+    }
+  }
+  private static func nativeValue(_ value: JSONValue) -> any Sendable {
+    switch value {
+    case .null: return NSNull()
+    case .bool(let value): return value
+    case .int(let value): return value
+    case .double(let value): return value
+    case .string(let value): return value
+    case .array(let values): return values.map(nativeValue)
+    case .object(let values): return values.mapValues(nativeValue)
+    }
   }
 }

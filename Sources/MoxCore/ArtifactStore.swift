@@ -146,6 +146,7 @@ public struct ArtifactStore: Sendable {
     var result: [ArtifactManifest] = []
     var damaged = Set<String>()
     for child in children {
+      try Task.checkCancellation()
       do {
       let values = try child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
       guard values.isDirectory == true, values.isSymbolicLink != true else {
@@ -163,6 +164,8 @@ public struct ArtifactStore: Sendable {
       }
       try verifyContents(manifest, in: child, synchronizeFiles: false)
       result.append(manifest)
+      } catch is CancellationError {
+        throw CancellationError()
       } catch {
         damaged.insert(child.lastPathComponent)
         Logger(subsystem: "dev.mox", category: "artifact")
@@ -186,6 +189,7 @@ public struct ArtifactStore: Sendable {
       at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey])
     else { throw MoxError(.storageFailed, "Cannot enumerate installation files.") }
     for case let url as URL in entries {
+      try Task.checkCancellation()
       let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey])
       guard values.isSymbolicLink != true else {
         throw MoxError(.invalidModel, "Installation contains a symbolic link.")
@@ -198,6 +202,7 @@ public struct ArtifactStore: Sendable {
       else { throw MoxError(.invalidModel, "Unexpected installation asset.") }
     }
     for file in manifest.files {
+      try Task.checkCancellation()
       try ArtifactValidation.verify(file, in: directory)
       if synchronizeFiles { try synchronize(directory.appendingPathComponent(file.path)) }
     }

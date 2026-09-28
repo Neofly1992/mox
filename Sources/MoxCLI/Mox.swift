@@ -27,7 +27,7 @@ import MoxProtocol
 
   static let configuration = CommandConfiguration(
     commandName: "mox", abstract: "Local MLX text inference",
-    version: "\(Wire.buildID) (\(BuildInfo.configuration))", subcommands: [Chat.self, Serve.self, Models.self])
+    version: "\(Wire.buildID) (\(BuildInfo.configuration))", subcommands: [Chat.self, Serve.self, Models.self, API.self])
 }
 struct Chat: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -143,6 +143,7 @@ func diagnostic(_ text: String) {
           case .contentDelta(let delta):
             try await writeOutput(delta, handle: handle)
             reply += delta
+          case .promptTokens, .toolCall, .matchedStopSequence: break
           case .phase(let phase): diagnostic("request=\(event.requestID) phase=\(phase)")
           case .usage(let usage):
             diagnostic(

@@ -5,6 +5,7 @@ import MoxDomain
 public struct LocalModel: Sendable, Hashable {
   public let directory: URL
   public let id: String
+  public let modelType: String
   public let weightBytes: Int
   public let contextSize: Int
   public let kvBytesPerToken: Int
@@ -52,6 +53,7 @@ public struct LocalModel: Sendable, Hashable {
     else {
       throw MoxError(.invalidModel, "Model architecture has no verified M1 resource estimate.")
     }
+    modelType = type
     func positive(_ key: String, fallback: Int? = nil) throws -> Int {
       guard let value = (config[key] as? Int) ?? fallback, value > 0, value <= 10_000_000 else {
         throw MoxError(.invalidModel, "Missing or invalid model dimension: \(key).")

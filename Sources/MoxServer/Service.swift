@@ -29,7 +29,9 @@ public actor InferenceService {
   private let runtime: RuntimeCoordinator
   private let downloads: DownloadManager?
   private let sources: (any ModelSourceFactory)?
+  private var publicAPI: PublicAPIManager?
   private var handles: [UUID: GenerationHandle] = [:]
+  private var publicRequestIDs = Set<UUID>()
   private var states: [UUID: RequestState] = [:]
   private var completed: [(UUID, ContinuousClock.Instant)] = []
   private var seen = Set<UUID>()
@@ -67,9 +69,41 @@ public actor InferenceService {
   public func shutdown() async {
     draining = true
     revision &+= 1
+    await publicAPI?.shutdown()
     await downloads?.shutdown()
     await runtime.shutdown()
   }
+  public func attachPublicAPI(_ manager: PublicAPIManager) { publicAPI = manager }
+  public func publicModels() async throws -> Data {
+    guard let downloads else { throw MoxError(.shuttingDown, "Model library is unavailable.") }
+    let models = await downloads.snapshot().installations.filter {
+      $0.availability == .ready && !$0.deletionPending
+    }.map { ["id": $0.alias, "object": "model", "created": 0,
+      "owned_by": "mox"] as [String: Any] }
+    return try JSONSerialization.data(withJSONObject: ["object": "list", "data": models])
+  }
+  public func beginPublic(model: String, request: GenerationRequest) async throws -> GenerationHandle {
+    guard let downloads else { throw MoxError(.shuttingDown, "Model library is unavailable.") }
+    guard let item = await downloads.snapshot().installations.first(where: {
+      ($0.alias == model || $0.id.uuidString == model) && $0.availability == .ready
+        && !$0.deletionPending
+    }) else { throw MoxError(.notFound, "Installed model was not found.") }
+    if request.toolChoice == .auto {
+      guard VerifiedToolModel.supports(item), try LocalModel(path: item.path).modelType == "qwen3" else {
+        throw MoxError(.unsupportedInput, "This model has no verified tool-call capability.")
+      }
+    }
+    let handle = try await begin(model: .init(kind: "localDirectory", path: item.path), request: request)
+    publicRequestIDs.insert(request.id)
+    return handle
+  }
+  public func stopPublicGenerations() async {
+    let active = publicRequestIDs.compactMap { handles[$0] }
+    active.forEach { $0.cancel() }
+    for handle in active { await handle.waitUntilStopped() }
+    publicRequestIDs.subtract(active.map(\.requestID))
+  }
+  public func observePublic(_ event: GenerationEvent) { observe(event) }
   private func prune() {
     while let first = completed.first,
       completed.count > ServiceCapacity.terminalDetails
@@ -93,23 +127,25 @@ public actor InferenceService {
       })
   }
   private func begin(_ body: GenerateBody) async throws -> GenerationHandle {
+    try await begin(model: body.model, request: body.domain())
+  }
+  private func begin(model: GenerateBody.Model, request: GenerationRequest) async throws -> GenerationHandle {
     guard !draining else { throw MoxError(.shuttingDown, "Service is stopping.") }
-    guard !seen.contains(body.requestID) else {
+    guard !seen.contains(request.id) else {
       throw MoxError(.busy, "Request ID was already submitted; do not replay it.")
     }
     guard seen.count < ServiceCapacity.rememberedRequestIDs else {
       throw MoxError(.resourceLimit, "Request identity capacity reached; restart the idle service.")
     }
-    let request = try body.domain()
     // Freeze deletion admission before validating and waiting for runtime resources.
     let reference: String
-    if body.model.kind == "installedAlias" {
+    if model.kind == "installedAlias" {
       guard let item = await downloads?.snapshot().installations.first(where: {
-        $0.alias == body.model.path && $0.availability == .ready && !$0.deletionPending
+        $0.alias == model.path && $0.availability == .ready && !$0.deletionPending
       }) else { throw MoxError(.notFound, "Installed model alias is unavailable.") }
       reference = item.path
     } else {
-      reference = body.model.path
+      reference = model.path
     }
     let path = URL(fileURLWithPath: reference).standardizedFileURL.resolvingSymlinksInPath().path
     if let installation = await downloads?.snapshot().installations.first(where: { $0.path == path }),
@@ -123,7 +159,7 @@ public actor InferenceService {
     submittingPaths.insert(path)
     defer { submittingPaths.remove(path) }
     let model = try LocalModel(path: path)
-    seen.insert(body.requestID)
+    seen.insert(request.id)
     let handle = try await runtime.generate(model: model, request: request)
     handles[request.id] = handle
     states[request.id] = .init(requestID: request.id, modelID: model.id)
@@ -139,6 +175,7 @@ public actor InferenceService {
       state.stopping = false
       completed.append((event.requestID, .now))
       handles.removeValue(forKey: event.requestID)
+      publicRequestIDs.remove(event.requestID)
     }
     states[event.requestID] = state
     revision &+= 1
@@ -170,7 +207,7 @@ public actor InferenceService {
           status: .unauthorized, closing: context.channel)
       }
       let path = request.uri.path
-      if !(request.method == .post && (path == "/mox/v1/generations" || path == "/mox/v1/downloads" || path == "/mox/v1/downloads/plan" || path == "/mox/v1/registries" || path == "/mox/v1/config/default" || path == "/mox/v1/models/import")),
+      if !(request.method == .post && (path == "/mox/v1/generations" || path == "/mox/v1/downloads" || path == "/mox/v1/downloads/plan" || path == "/mox/v1/registries" || path == "/mox/v1/config/default" || path == "/mox/v1/models/import" || path == "/mox/v1/public-api")),
         request.headers[.transferEncoding] != nil
           || (request.headers[.contentLength].flatMap(Int.init) ?? 0) > 0
       {
@@ -180,6 +217,32 @@ public actor InferenceService {
       }
       if request.method == .get, path == "/mox/v1/identity" { return try json(identity) }
       if request.method == .get, path == "/mox/v1/state" { return try json(await snapshot()) }
+      if request.method == .get, path == "/mox/v1/public-api" {
+        guard let publicAPI else { throw MoxError(.shuttingDown, "Public API control is unavailable.") }
+        return try json(await publicAPI.status())
+      }
+      if request.method == .get, path == "/mox/v1/public-api/key" {
+        guard let publicAPI, let key = try await publicAPI.currentKey() else {
+          throw MoxError(.notFound, "Public API key has not been created.")
+        }
+        return try json(key)
+      }
+      if request.method == .post, path == "/mox/v1/public-api/rotate" {
+        guard let publicAPI else { throw MoxError(.shuttingDown, "Public API control is unavailable.") }
+        return try json(try await publicAPI.rotateKey())
+      }
+      if request.method == .post, path == "/mox/v1/public-api" {
+        guard let publicAPI else { throw MoxError(.shuttingDown, "Public API control is unavailable.") }
+        var data = Data()
+        for try await buffer in request.body {
+          guard buffer.readableBytes <= 1024 - data.count else {
+            throw MoxError(.bodyTooLarge, "Public API setting exceeds 1 KiB.")
+          }
+          data.append(contentsOf: buffer.readableBytesView)
+        }
+        let body = try Wire.decode(PublicAPIChange.self, data)
+        return try json(try await publicAPI.setEnabled(body.enabled))
+      }
       if request.method == .post, path == "/mox/v1/config/default" {
         guard let downloads else { throw MoxError(.shuttingDown, "Source settings are unavailable.") }
         var data = Data()
@@ -538,6 +601,22 @@ public actor InferenceService {
       }
     }
     return response
+  }
+}
+
+/// Capability evidence is tied to a pinned artifact, not an architecture name.
+enum VerifiedToolModel {
+  static func supports(_ item: ModelInstallation) -> Bool {
+    guard let manifest = item.manifest,
+      manifest.origin.repository == "mlx-community/Qwen3-0.6B-4bit",
+      manifest.origin.revision == "73e3e38d981303bc594367cd910ea6eb48349da8",
+      manifest.origin.variant.isEmpty,
+      manifest.files.contains(where: { $0.path == "model.safetensors" &&
+        $0.digest == .sha256("392e8d466d56100ada00eb82031fb854297fc9e389b7d303eba3af114e87bce2") }),
+      manifest.files.contains(where: { $0.path == "tokenizer.json" &&
+        $0.digest == .sha256("aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4") })
+    else { return false }
+    return true
   }
 }
 

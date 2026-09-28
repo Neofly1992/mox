@@ -69,6 +69,22 @@ private let artifactOrigin = ArtifactOrigin(
   }
 }
 
+@Test func artifactHashingStopsWhenStartupTaskIsCancelled() async throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let data = Data(repeating: 7, count: 8 * 1024 * 1024)
+  try data.write(to: root.appendingPathComponent("weights"))
+  let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+  let file = ArtifactFile(path: "weights", bytes: Int64(data.count), digest: .sha256(digest))
+  let check = Task {
+    withUnsafeCurrentTask { $0?.cancel() }
+    try ArtifactValidation.verify(file, in: root)
+  }
+  await #expect(throws: CancellationError.self) { try await check.value }
+  try ArtifactValidation.verify(file, in: root)
+}
+
 @Test(arguments: [false, true])
 func artifactCommitFailureLeavesRecoverableFiles(afterRename: Bool) throws {
   let model = try fixture()

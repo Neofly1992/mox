@@ -18,9 +18,26 @@ public struct MoxError: Error, Sendable, Equatable, Codable, CustomStringConvert
 public enum ContentBlock: Sendable, Equatable {
   case text(String)
   case toolCall(id: String, name: String, arguments: String)
-  case toolResult(callID: String, text: String)
+  case toolResult(callID: String, text: String, isError: Bool)
   case media(assetID: String, mediaType: String)
 }
+public struct ToolDefinition: Sendable, Equatable {
+  public let name: String
+  public let description: String?
+  /// Canonical JSON object. Wire-specific schemas never enter Domain.
+  public let parametersJSON: String
+  public init(name: String, description: String? = nil, parametersJSON: String) throws {
+    guard !name.isEmpty, name.utf8.count <= 128,
+      let bytes = parametersJSON.data(using: .utf8), bytes.count <= 65_536,
+      let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+      object["type"] as? String == "object"
+    else { throw MoxError(.invalidParameters, "Invalid function tool schema.") }
+    self.name = name
+    self.description = description
+    self.parametersJSON = parametersJSON
+  }
+}
+public enum ToolChoice: String, Sendable { case none, auto }
 public struct Message: Sendable, Equatable {
   public enum Role: String, Codable, Sendable { case system, user, assistant, tool }
   public let role: Role
@@ -64,11 +81,50 @@ public struct GenerationRequest: Sendable {
   public let id: UUID
   public let messages: [Message]
   public let sampling: Sampling
-  public init(id: UUID = UUID(), messages: [Message], sampling: Sampling) throws {
+  public let stopSequences: [String]
+  public let tools: [ToolDefinition]
+  public let toolChoice: ToolChoice
+  public init(id: UUID = UUID(), messages: [Message], sampling: Sampling,
+    stopSequences: [String] = [], tools: [ToolDefinition] = [], toolChoice: ToolChoice = .none) throws {
     guard !messages.isEmpty else {
       throw MoxError(.invalidParameters, "At least one message is required.")
     }
-    for message in messages { _ = try message.text() }
+    guard stopSequences.count <= 4, stopSequences.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 }),
+      tools.count <= 32, Set(tools.map(\.name)).count == tools.count,
+      toolChoice == .none || !tools.isEmpty
+    else { throw MoxError(.invalidParameters, "Invalid stop sequences or tools.") }
+    var pending = Set<String>()
+    var usedCallIDs = Set<String>()
+    for message in messages {
+      let hasToolResult = message.content.contains { block in
+        if case .toolResult = block { return true }
+        return false
+      }
+      if !pending.isEmpty {
+        guard (message.role == .tool || message.role == .user), hasToolResult
+        else { throw MoxError(.invalidParameters, "Tool results must immediately follow their assistant calls.") }
+      }
+      for block in message.content {
+        switch block {
+        case .text: guard message.role != .tool else { throw MoxError(.unsupportedInput, "Tool messages require a call ID.") }
+        case .toolCall(let id, _, let arguments):
+          guard message.role == .assistant, !id.isEmpty, !usedCallIDs.contains(id),
+            let data = arguments.data(using: .utf8),
+            (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
+          else { throw MoxError(.invalidParameters, "Invalid assistant tool call.") }
+          pending.insert(id)
+          usedCallIDs.insert(id)
+        case .toolResult(let callID, _, _):
+          guard message.role == .tool || message.role == .user, pending.remove(callID) != nil
+          else { throw MoxError(.invalidParameters, "Tool result has no pending call.") }
+        case .media: throw MoxError(.unsupportedInput, "Media input is not available in M4.")
+        }
+      }
+      if message.role == .user, hasToolResult, !pending.isEmpty {
+        throw MoxError(.invalidParameters, "All tool results must be in the same user turn.")
+      }
+    }
+    guard pending.isEmpty else { throw MoxError(.invalidParameters, "Tool results are missing.") }
     guard
       messages.reduce(
         0,
@@ -77,8 +133,12 @@ public struct GenerationRequest: Sendable {
             + $1.content.reduce(
               0,
               { total, block in
-                if case .text(let text) = block { return total + text.utf8.count }
-                return total
+                switch block {
+                case .text(let text): return total + text.utf8.count
+                case .toolCall(let id, let name, let arguments): return total + id.utf8.count + name.utf8.count + arguments.utf8.count
+                case .toolResult(let id, let text, _): return total + id.utf8.count + text.utf8.count
+                case .media: return total
+                }
               })
         }) <= Self.maximumInputBytes
     else {
@@ -87,11 +147,14 @@ public struct GenerationRequest: Sendable {
     self.id = id
     self.messages = messages
     self.sampling = sampling
+    self.stopSequences = stopSequences
+    self.tools = tools
+    self.toolChoice = toolChoice
   }
 }
 public enum FinishReason: String, Codable, Sendable {
-  case stop, length, cancelled
-  public var includesTurnInContext: Bool { self == .stop || self == .length }
+  case stop, stopSequence, length, toolCalls, cancelled
+  public var includesTurnInContext: Bool { self != .cancelled }
 }
 public struct Usage: Codable, Sendable {
   public let promptTokens: Int
@@ -109,7 +172,10 @@ public struct Usage: Codable, Sendable {
 }
 public enum GenerationPayload: Sendable {
   case phase(String)
+  case promptTokens(Int)
   case contentDelta(String)
+  case toolCall(id: String, name: String, arguments: String)
+  case matchedStopSequence(String)
   case usage(Usage)
   case finished(FinishReason)
   case failed(MoxError)

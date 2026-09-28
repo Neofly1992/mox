@@ -44,6 +44,31 @@ public struct Discovery: Codable, Sendable {
     self.token = token
   }
 }
+public struct PublicAPIStatus: Codable, Sendable {
+  public let enabled: Bool
+  public let endpoint: String?
+  public let errorCode: String?
+  /// Changes whenever the public credential changes. Contains no credential material.
+  public let credentialID: UUID
+  public init(enabled: Bool, endpoint: String?, errorCode: String?, credentialID: UUID = UUID()) {
+    self.enabled = enabled
+    self.endpoint = endpoint
+    self.errorCode = errorCode
+    self.credentialID = credentialID
+  }
+}
+public struct PublicAPIChange: Codable, Sendable {
+  public let enabled: Bool
+  public init(enabled: Bool) { self.enabled = enabled }
+}
+public struct PublicAPIKey: Codable, Sendable {
+  public let key: String
+  public let credentialID: UUID
+  public init(key: String, credentialID: UUID) {
+    self.key = key
+    self.credentialID = credentialID
+  }
+}
 public struct WireMessage: Codable, Sendable {
   public struct Block: Codable, Sendable {
     public var type: String
@@ -70,6 +95,7 @@ public struct GenerateBody: Codable, Sendable {
   public struct Model: Codable, Sendable {
     public var kind: String
     public var path: String
+    public init(kind: String, path: String) { self.kind = kind; self.path = path }
   }
   public struct Parameters: Codable, Sendable {
     public var maxTokens: Int
@@ -122,7 +148,12 @@ public struct EventFrame: Codable, Sendable {
   public var sequence: Int
   public var type: String
   public var phase: String?
+  public var promptTokens: Int?
   public var text: String?
+  public var toolCallID: String?
+  public var toolName: String?
+  public var toolArguments: String?
+  public var stopSequence: String?
   public var usage: Usage?
   public var reason: FinishReason?
   public var error: MoxError?
@@ -134,9 +165,20 @@ public struct EventFrame: Codable, Sendable {
     case .phase(let value):
       type = "phase"
       phase = value
+    case .promptTokens(let value):
+      type = "promptTokens"
+      promptTokens = value
     case .contentDelta(let value):
       type = "contentDelta"
       text = value
+    case .toolCall(let id, let name, let arguments):
+      type = "toolCall"
+      toolCallID = id
+      toolName = name
+      toolArguments = arguments
+    case .matchedStopSequence(let value):
+      type = "matchedStopSequence"
+      stopSequence = value
     case .usage(let value):
       type = "usage"
       usage = value
@@ -152,7 +194,11 @@ public struct EventFrame: Codable, Sendable {
     let payload: GenerationPayload
     switch type {
     case "phase" where phase != nil: payload = .phase(phase!)
+    case "promptTokens" where promptTokens != nil: payload = .promptTokens(promptTokens!)
     case "contentDelta" where text != nil: payload = .contentDelta(text!)
+    case "toolCall" where toolCallID != nil && toolName != nil && toolArguments != nil:
+      payload = .toolCall(id: toolCallID!, name: toolName!, arguments: toolArguments!)
+    case "matchedStopSequence" where stopSequence != nil: payload = .matchedStopSequence(stopSequence!)
     case "usage" where usage != nil: payload = .usage(usage!)
     case "finished" where reason != nil: payload = .finished(reason!)
     case "failed" where error != nil: payload = .failed(error!)

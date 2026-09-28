@@ -120,6 +120,13 @@ public actor DownloadManager {
     try await persist(next)
     return next.configuration
   }
+  public func setPublicAPIEnabled(_ enabled: Bool) async throws -> ModelConfiguration {
+    var next = state
+    next.configuration.publicAPIEnabled = enabled
+    next.configuration.revision += 1
+    try await persist(next)
+    return next.configuration
+  }
   public func updateRegistry(_ registry: ModelRegistry, expectedRevision: UInt64) async throws -> ModelConfiguration {
     guard expectedRevision == state.configuration.revision else {
       throw MoxError(.busy, "Source configuration changed; reload and try again.")

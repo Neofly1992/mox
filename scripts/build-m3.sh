@@ -10,7 +10,6 @@ case "$configuration" in
   *) echo 'Usage: scripts/build-m3.sh [Debug|Release]' >&2; exit 2 ;;
 esac
 if [[ $# -gt 1 ]]; then echo 'Expected one build configuration.' >&2; exit 2; fi
-python3 scripts/stamp-m3-build.py
 python3 scripts/generate-xcode-project.py
 mkdir -p ".build/${milestone}-package.xcworkspace"
 python3 - <<'PY'
@@ -21,6 +20,11 @@ E.SubElement(w,'FileRef',location='absolute:'+str(Path.cwd()))
 import os
 E.ElementTree(w).write('.build/'+os.environ['MOX_BUILD_MILESTONE']+'-package.xcworkspace/contents.xcworkspacedata',encoding='utf-8',xml_declaration=True)
 PY
+# SwiftPM may normalize Package.resolved on a fresh checkout. Resolve first so the
+# worker identity covers the exact lockfile that the App embed phase will check.
+xcodebuild -resolvePackageDependencies -workspace ".build/${milestone}-package.xcworkspace" \
+  -scheme mox -derivedDataPath .build/xcode -skipPackagePluginValidation
+python3 scripts/stamp-m3-build.py
 xcodebuild -workspace ".build/${milestone}-package.xcworkspace" -scheme mox -configuration "$configuration" \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/xcode \
   -skipPackagePluginValidation ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO DEBUG_INFORMATION_FORMAT="$debug_information" build
@@ -30,6 +34,7 @@ worker="$PWD/.build/${milestone}-worker/$configuration"
 rm -rf "$worker"
 mkdir -p "$worker/licenses"
 cp "$products/mox" "$worker/mox"
+cp Sources/MoxProtocol/BuildIdentity.swift "$worker/BuildIdentity.swift"
 if [[ -d "$products/mox.dSYM" ]]; then ditto "$products/mox.dSYM" "$worker/mox.dSYM"; fi
 cp "$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" "$worker/mlx.metallib"
 for bundle in "$products"/*.bundle; do ditto "$bundle" "$worker/$(basename "$bundle")"; done

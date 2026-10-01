@@ -36,6 +36,9 @@ public struct RuntimeSnapshot: Sendable {
   public let reservedBytes: Int
   public let activeLeases: Int
   public let queued: Int
+  public let budgetBytes: Int
+  public let queueCapacity: Int
+  public let queueTimeoutSeconds: Int
 }
 
 public actor RuntimeCoordinator {
@@ -64,6 +67,7 @@ public actor RuntimeCoordinator {
   private var idleWaiters: [CheckedContinuation<Void, Never>] = []
   private var reserved = 0
   private var leases = Set<UUID>()
+  private var pinnedModelIDs = Set<String>()
   private var tick = 0
   public init(
     backend: any RuntimeBackend, policy: RuntimePolicy,
@@ -80,7 +84,13 @@ public actor RuntimeCoordinator {
   public func snapshot() -> RuntimeSnapshot {
     .init(
       residentModels: slots.count, reservedBytes: reserved, activeLeases: leases.count,
-      queued: queue.count)
+      queued: queue.count, budgetBytes: policy.budgetBytes,
+      queueCapacity: policy.queueCapacity,
+      queueTimeoutSeconds: Int(policy.queueTimeout.components.seconds))
+  }
+  public func setPinned(modelID: String, _ pinned: Bool) {
+    if pinned { pinnedModelIDs.insert(modelID) }
+    else { pinnedModelIDs.remove(modelID) }
   }
   public func generate(model: LocalModel, request: GenerationRequest) throws -> GenerationHandle {
     guard !closing else { throw MoxError(.shuttingDown, "Runtime is shutting down.") }
@@ -207,6 +217,7 @@ public actor RuntimeCoordinator {
       release()
     } catch {
       reserved -= extra
+      loads.removeValue(forKey: model.id)
       release()
       throw error
     }
@@ -215,7 +226,10 @@ public actor RuntimeCoordinator {
     let headroom = availableMemory().map { Int(Double($0) * 0.8) }
     let ceiling = min(policy.budgetBytes, headroom.map { reserved + $0 } ?? policy.budgetBytes)
     while reserved + required > ceiling {
-      guard let idle = slots.values.filter({ $0.model.id != modelID }).min(by: { $0.tick < $1.tick })
+      guard let idle = slots.values.filter({
+        $0.model.id != modelID && !pinnedModelIDs.contains($0.model.id)
+          && !handleModels.values.contains($0.model.id)
+      }).min(by: { $0.tick < $1.tick })
       else { throw MoxError(.resourceLimit, "No idle model can free enough memory.") }
       slots.removeValue(forKey: idle.model.id)
       await idle.loaded.unload()
@@ -245,6 +259,7 @@ public actor RuntimeCoordinator {
       )
       signposter.endInterval("load", interval)
     } catch {
+      if !handleModels.values.contains(model.id) { loads.removeValue(forKey: model.id) }
       signposter.endInterval("load", interval)
       throw error
     }

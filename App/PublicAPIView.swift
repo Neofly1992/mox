@@ -1,5 +1,6 @@
 import AppKit
 import MoxChat
+import MoxDomain
 import MoxProtocol
 import Observation
 import SwiftUI
@@ -9,15 +10,18 @@ import SwiftUI
   var key: String?
   var error: String?
   var busy = false
+  private func show(_ failure: Error, stage: String, chat: ChatController) {
+    chat.recordOperationFailure(failure, stage: stage)
+    error = (failure as? MoxError)?.description ?? "API 操作失败，请导出诊断。"
+  }
   func refresh(chat: ChatController) async {
     guard let client = chat.connection?.client else { return }
     do {
       let updated = try await client.publicAPIStatus()
       if updated.credentialID != status.credentialID { key = nil }
       status = updated
-      error = nil
     }
-    catch { self.error = String(describing: error) }
+    catch { show(error, stage: "public.status", chat: chat) }
   }
   func toggle(chat: ChatController) async {
     guard !busy, let client = chat.connection?.client else { return }
@@ -27,7 +31,7 @@ import SwiftUI
       status = try await client.setPublicAPIEnabled(!status.enabled)
       key = nil
       error = nil
-    } catch { self.error = String(describing: error) }
+    } catch { show(error, stage: "public.toggle", chat: chat) }
   }
   func reveal(chat: ChatController) async {
     guard let client = chat.connection?.client else { return }
@@ -38,7 +42,7 @@ import SwiftUI
         errorCode: status.errorCode, credentialID: result.credentialID)
       error = nil
     }
-    catch { self.error = String(describing: error) }
+    catch { show(error, stage: "public.key", chat: chat) }
   }
   func rotate(chat: ChatController) async {
     guard !busy, let client = chat.connection?.client else { return }
@@ -51,7 +55,7 @@ import SwiftUI
         errorCode: status.errorCode, credentialID: result.credentialID)
       error = nil
     }
-    catch { self.error = String(describing: error) }
+    catch { show(error, stage: "public.rotate", chat: chat) }
   }
 }
 
@@ -96,7 +100,7 @@ struct PublicAPIView: View {
       Section("连接示例") {
         Text("OpenAI SDK：base_url 设为上方地址，api_key 设为此处密钥；调用 chat.completions.create。")
         Text("Anthropic SDK：base_url 设为上方地址去掉 /v1，api_key 设为此处密钥；调用 messages.create。")
-        Text("model 使用模型页显示的已安装别名。API 请求不会写入测试会话。")
+        Text("model 使用模型页可复制的 API 模型标识。API 请求不会写入测试会话。")
       }
       if let error = control.error {
         Section("诊断") { Text(error).foregroundStyle(.red).textSelection(.enabled) }

@@ -139,47 +139,22 @@ public struct ArtifactStore: Sendable {
 
   /// Inspect each artifact independently. One damaged installation must not prevent
   /// the service from opening its library and allowing that installation to be removed.
-  public func inspectCommitted() throws -> (valid: [ArtifactManifest], damagedIDs: Set<String>) {
-    let directory = root.appendingPathComponent("artifacts")
-    let children = try FileManager.default.contentsOfDirectory(
-      at: directory, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-    var result: [ArtifactManifest] = []
-    var damaged = Set<String>()
-    for child in children {
-      try Task.checkCancellation()
-      do {
-      let values = try child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-      guard values.isDirectory == true, values.isSymbolicLink != true else {
-        throw MoxError(.storageFailed, "Unexpected entry in the managed artifact store.")
-      }
-      let url = child.appendingPathComponent("mox-manifest.json")
-      let metadata = try url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey, .isRegularFileKey])
-      guard metadata.isSymbolicLink != true, metadata.isRegularFile == true,
-        let bytes = metadata.fileSize, bytes <= ArtifactValidation.maximumManifestBytes
-      else { throw MoxError(.storageFailed, "Invalid installed manifest.") }
-      let manifest = try JSONDecoder().decode(ArtifactManifest.self, from: Data(contentsOf: url))
-      try ArtifactValidation.validate(manifest)
-      guard child.lastPathComponent == (try ArtifactValidation.identifier(for: manifest.origin)) else {
-        throw MoxError(.storageFailed, "Artifact identity does not match its directory.")
-      }
-      try verifyContents(manifest, in: child, synchronizeFiles: false)
-      result.append(manifest)
-      } catch is CancellationError {
-        throw CancellationError()
-      } catch {
-        damaged.insert(child.lastPathComponent)
-        Logger(subsystem: "dev.mox", category: "artifact")
-          .error("stage=recovery status=damaged identifier=\(child.lastPathComponent, privacy: .public)")
-      }
-    }
-    return (result, damaged)
+  public func inspectCommitted(_ origin: ArtifactOrigin) throws -> ArtifactManifest {
+    try inspectCommittedDirectory(installedDirectory(for: origin))
   }
-  public func committedManifests() throws -> [ArtifactManifest] {
-    let inspection = try inspectCommitted()
-    guard inspection.damagedIDs.isEmpty else {
-      throw MoxError(.invalidModel, "One or more managed installations are damaged.")
-    }
-    return inspection.valid
+  func inspectCommittedDirectory(_ child: URL, verifyFiles: Bool = true) throws -> ArtifactManifest {
+    try Task.checkCancellation()
+    let values = try child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+    guard values.isDirectory == true, values.isSymbolicLink != true else { throw MoxError(.storageFailed, "Unexpected managed artifact entry.") }
+    let url = child.appendingPathComponent("mox-manifest.json")
+    let metadata = try url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey, .isRegularFileKey])
+    guard metadata.isSymbolicLink != true, metadata.isRegularFile == true,
+      let bytes = metadata.fileSize, bytes <= ArtifactValidation.maximumManifestBytes else { throw MoxError(.storageFailed, "Invalid installed manifest.") }
+    let manifest = try JSONDecoder().decode(ArtifactManifest.self, from: Data(contentsOf: url))
+    try ArtifactValidation.validate(manifest)
+    guard child.lastPathComponent == (try ArtifactValidation.identifier(for: manifest.origin)) else { throw MoxError(.storageFailed, "Artifact identity does not match its directory.") }
+    if verifyFiles { try verifyContents(manifest, in: child, synchronizeFiles: false) }
+    return manifest
   }
 
   private func verifyContents(_ manifest: ArtifactManifest, in directory: URL,

@@ -19,9 +19,11 @@ public final class ServiceClient: Sendable {
     request.setValue("Bearer \(discovery.token)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.cachePolicy = .reloadIgnoringLocalCacheData
-    request.timeoutInterval =
-      path.contains("/cancel")
-      ? ServiceTiming.cancellationRequestTimeout : ServiceTiming.requestTimeout
+    if path.contains("/cancel") {
+      request.timeoutInterval = ServiceTiming.cancellationRequestTimeout
+    } else if path == "/downloads" || path == "/downloads/plan" || path.hasSuffix("/load") {
+      request.timeoutInterval = ServiceTiming.managementWorkTimeout
+    } else { request.timeoutInterval = ServiceTiming.requestTimeout }
     return request
   }
   public func identity() async throws -> ServiceIdentity {
@@ -32,6 +34,7 @@ public final class ServiceClient: Sendable {
     return value
   }
   public func state() async throws -> ServiceState { try await json("/state") }
+  public func diagnosticEvents() async throws -> [DiagnosticEvent] { try await json("/diagnostics") }
   public func publicAPIStatus() async throws -> PublicAPIStatus { try await json("/public-api") }
   public func setPublicAPIEnabled(_ enabled: Bool) async throws -> PublicAPIStatus {
     try await json("/public-api", method: "POST", body: Wire.encode(PublicAPIChange(enabled: enabled)))
@@ -47,13 +50,32 @@ public final class ServiceClient: Sendable {
     try await json("/generations/\(id)")
   }
   public func generate(path: String, request: GenerationRequest) throws -> RemoteGeneration {
-    let body = try Wire.encode(GenerateBody(path: path, request: request))
+    try generate(model: .init(kind: "localDirectory", path: path), request: request)
+  }
+  public func generate(model: GenerateBody.Model, request: GenerationRequest) throws -> RemoteGeneration {
+    let body = try Wire.encode(GenerateBody(model: model, request: request))
     return RemoteGeneration(
       client: self, requestID: request.id,
       request: try self.request("/generations", method: "POST", body: body))
   }
   public func setDefaultRegistry(_ update: DefaultRegistryUpdate) async throws -> ModelConfiguration {
     try await json("/config/default", method: "POST", body: Wire.encode(update))
+  }
+  public func resolveSampling(_ body: SamplingResolutionBody) async throws -> EffectiveSampling {
+    try await json("/config/effective", method: "POST", body: Wire.encode(body))
+  }
+  public func setGlobalSampling(_ update: GlobalSamplingUpdate) async throws -> ModelConfiguration {
+    try await json("/config/sampling", method: "POST", body: Wire.encode(update))
+  }
+  public func setModelSampling(_ id: UUID, _ update: ModelSamplingUpdate)
+    async throws -> ModelInstallationSummary
+  {
+    try await json("/models/\(id)/sampling", method: "POST", body: Wire.encode(update))
+  }
+  public func setModelPinned(_ id: UUID, _ update: ModelPinUpdate)
+    async throws -> ModelInstallationSummary
+  {
+    try await json("/models/\(id)/pin", method: "POST", body: Wire.encode(update))
   }
   public func updateRegistry(_ update: RegistryUpdate) async throws -> ModelConfiguration {
     try await json("/registries", method: "POST", body: Wire.encode(update))

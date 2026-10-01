@@ -83,6 +83,19 @@ func runtime(_ backend: ProbeBackend, queue: Int = 8, timeout: Duration = .secon
     backend: backend,
     policy: .init(budgetBytes: 512 * 1024 * 1024, queueCapacity: queue, queueTimeout: timeout))
 }
+@Test func explicitLoadFailureReleasesTaskAndReservation() async throws {
+  let model = try fixture()
+  defer { try? FileManager.default.removeItem(at: model.directory) }
+  let backend = ProbeBackend(failures: 1)
+  let core = runtime(backend)
+  await #expect(throws: MoxError.self) { try await core.load(model: model) }
+  #expect(await core.snapshot().reservedBytes == 0)
+  #expect(await core.modelStates().isEmpty)
+  try await core.load(model: model)
+  #expect(await backend.loads == 2)
+  #expect(await core.snapshot().residentModels == 1)
+  await core.shutdown()
+}
 @Test func parametersAndSession() throws {
   for tokens in [0, -1, 8193] { #expect(throws: MoxError.self) { try Sampling(maxTokens: tokens) } }
   for temperature: Float in [.nan, .infinity, -1, 3] {
@@ -100,6 +113,61 @@ func runtime(_ backend: ProbeBackend, queue: Int = 8, timeout: Duration = .secon
   #expect(session.messages.isEmpty)
   session.complete(prompt: "hello", reply: "world", reason: .length)
   #expect(try session.request(prompt: "next", sampling: Sampling()).messages.count == 3)
+}
+@Test func samplingPriorityAndProvenance() throws {
+  let effective = try EffectiveSampling.resolve(
+    request: .init(temperature: 0), model: .init(maxTokens: 321, temperature: 0.8),
+    launch: .init(maxTokens: 512, topP: 0.7), global: .init(maxTokens: 1024, topP: 0.9))
+  #expect(effective.maxTokens == 321 && effective.maxTokensSource == .model)
+  #expect(effective.temperature == 0 && effective.temperatureSource == .request)
+  #expect(effective.topP == 0.7 && effective.topPSource == .launch)
+  let defaulted = try EffectiveSampling.resolve()
+  #expect(defaulted.maxTokensSource == .product)
+  #expect(defaulted.temperatureSource == .product)
+  #expect(defaulted.topPSource == .product)
+  #expect(throws: MoxError.self) {
+    try EffectiveSampling.resolve(global: .init(temperature: .nan))
+  }
+}
+
+@Test func initialLibraryFormatRejectsMissingRequiredState() throws {
+  let snapshot = ModelLibrarySnapshot(installations: [
+    ModelInstallation(path: "/fixture", manifest: nil, alias: "fixture")])
+  let data = try JSONEncoder().encode(snapshot)
+  let reopened = try JSONDecoder().decode(ModelLibrarySnapshot.self, from: data)
+  #expect(reopened.installations == snapshot.installations)
+  var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+  object.removeValue(forKey: "configuration")
+  #expect(throws: DecodingError.self) {
+    try JSONDecoder().decode(ModelLibrarySnapshot.self,
+      from: JSONSerialization.data(withJSONObject: object))
+  }
+  object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+  var installations = try #require(object["installations"] as? [[String: Any]])
+  installations[0].removeValue(forKey: "availability")
+  object["installations"] = installations
+  #expect(throws: DecodingError.self) {
+    try JSONDecoder().decode(ModelLibrarySnapshot.self,
+      from: JSONSerialization.data(withJSONObject: object))
+  }
+}
+@Test func pinnedResidentCannotBeAutomaticallyEvicted() async throws {
+  let first = try fixture()
+  let second = try fixture()
+  defer {
+    try? FileManager.default.removeItem(at: first.directory)
+    try? FileManager.default.removeItem(at: second.directory)
+  }
+  let core = RuntimeCoordinator(backend: ProbeBackend(),
+    policy: .init(budgetBytes: first.weightBytes * 2))
+  try await core.load(model: first)
+  await core.setPinned(modelID: first.id, true)
+  await #expect(throws: MoxError.self) { try await core.load(model: second) }
+  #expect(await core.snapshot().residentModels == 1)
+  await core.setPinned(modelID: first.id, false)
+  try await core.load(model: second)
+  #expect(await core.modelStates().map(\.id) == [second.id])
+  await core.shutdown()
 }
 @Test func localValidation() throws {
   let model = try fixture()

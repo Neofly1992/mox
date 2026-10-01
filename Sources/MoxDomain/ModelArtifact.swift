@@ -3,7 +3,7 @@ import Foundation
 public enum ModelProvider: String, Codable, Sendable { case huggingFace, modelScope }
 
 /// An access endpoint is deliberately absent: mirrors do not change model identity.
-public struct ArtifactOrigin: Codable, Sendable, Equatable {
+public struct ArtifactOrigin: Codable, Sendable, Hashable {
   public static let aliasPrefix = "mox:"
   public let registryID: UUID
   public let repository: String

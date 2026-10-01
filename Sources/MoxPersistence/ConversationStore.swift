@@ -306,13 +306,11 @@ public struct PendingAttempt: Sendable {
 public actor ConversationContainerFactory {
   public static let shared = ConversationContainerFactory()
   public func create(
-    in directory: URL, schema: any VersionedSchema.Type = ChatSchema.self,
-    migrationPlan: (any SchemaMigrationPlan.Type)? = ChatMigration.self
+    in directory: URL
   ) throws -> ModelContainer {
     let configuration = ModelConfiguration(
       url: directory.appendingPathComponent("Conversation.store"))
-    return try ModelContainer(
-      for: Schema(versionedSchema: schema), migrationPlan: migrationPlan,
+    return try ModelContainer(for: Schema(versionedSchema: ChatSchema.self),
       configurations: configuration)
   }
 }

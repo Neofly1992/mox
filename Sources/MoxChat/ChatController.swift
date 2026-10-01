@@ -47,8 +47,11 @@ public struct LiveReply: Sendable {
   public var live: LiveReply?
   public var error: String?
   public var storageAvailable = false
-  public var maxTokens = 2048
-  public var temperature: Float = 0.6
+  public var maxTokens = Sampling.defaultMaxTokens
+  public var temperature: Float = Sampling.defaultTemperature
+  public var maxTokensExplicit = false
+  public var temperatureExplicit = false
+  public private(set) var effectiveSampling: EffectiveSampling?
   public private(set) var isWorking = false
   public private(set) var isClosing = false
   public private(set) var stopWaitIsLong = false
@@ -92,6 +95,32 @@ public struct LiveReply: Sendable {
     return connection.client.discovery.identity.ownership == .externallyManaged
       ? "外部托管服务" : "已有外部服务"
   }
+  public func selectModel(path: String) async {
+    modelPath = path
+    maxTokensExplicit = false
+    temperatureExplicit = false
+    await refreshEffectiveSampling()
+  }
+  public func setMaxTokensOverride(_ value: Int) {
+    maxTokens = value
+    maxTokensExplicit = true
+    effectiveSampling = nil
+  }
+  public func setTemperatureOverride(_ value: Float) {
+    temperature = value
+    temperatureExplicit = true
+    effectiveSampling = nil
+  }
+  public func refreshEffectiveSampling() async {
+    guard let client = connection?.client, !modelPath.isEmpty else { return }
+    do {
+      let effective = try await client.resolveSampling(.init(
+        model: .init(kind: "localDirectory", path: modelPath)))
+      effectiveSampling = effective
+      if !maxTokensExplicit { maxTokens = effective.maxTokens }
+      if !temperatureExplicit { temperature = effective.temperature }
+    } catch { show(error) }
+  }
   public func start() async {
     BuildInfo.logStartup(component: "app")
     do {
@@ -132,6 +161,7 @@ public struct LiveReply: Sendable {
       serviceState = state
       servicePhase = "running"
       error = nil
+      if !modelPath.isEmpty { await refreshEffectiveSampling() }
       ring.record(
         .init(
           stage: "connection", code: "running",
@@ -240,14 +270,21 @@ public struct LiveReply: Sendable {
     let targetID = selectedID
     let prompt = draft
     let path = modelPath
-    let tokens = maxTokens
-    let samplingTemperature = temperature
+    let explicit = SamplingSettings(
+      maxTokens: maxTokensExplicit ? maxTokens : nil,
+      temperature: temperatureExplicit ? temperature : nil)
     stopWaitIsLong = false
     error = nil
     let currentEpoch = epoch
     var unstarted: PendingAttempt?
     var unstartedConversationID: UUID?
     do {
+      let effective = try await connection.client.resolveSampling(.init(
+        model: .init(kind: "localDirectory", path: path), explicit: explicit))
+      effectiveSampling = effective
+      if !maxTokensExplicit { maxTokens = effective.maxTokens }
+      if !temperatureExplicit { temperature = effective.temperature }
+      let sampling = try effective.sampling()
       let cid: UUID
       if let targetID {
         cid = targetID
@@ -257,7 +294,7 @@ public struct LiveReply: Sendable {
       }
       let pending = try await store.begin(
         conversationID: cid, prompt: prompt, modelPath: path,
-        sampling: Sampling(maxTokens: tokens, temperature: samplingTemperature), retryOf: retryOf)
+        sampling: sampling, retryOf: retryOf)
       unstarted = pending
       unstartedConversationID = cid
       if retryOf == nil, draft == prompt { draft = "" }
@@ -420,8 +457,7 @@ public struct LiveReply: Sendable {
       let state = try await connection.client.state()
       serviceState = state
       if !state.requests.isEmpty { return true }
-      let library = try await connection.client.library()
-      return library.operations.contains { $0.phase.isActive }
+      return state.activeDownloads > 0
     } catch {
       show(error)
       return true
@@ -502,7 +538,15 @@ public struct LiveReply: Sendable {
       self.error = (error as? MoxError)?.description ?? "storageFailed: 无法打开或保存对话。原数据已保留，请检查诊断。"
     }
   }
-  public func diagnostics() throws -> Data {
+  public func recordOperationFailure(_ failure: Error, stage: String, operationID: UUID? = nil) {
+    let code = (failure as? MoxError)?.code.rawValue ?? "operationFailed"
+    let underlying = failure as NSError
+    ring.record(.init(stage: stage, code: code,
+      instanceID: connection?.client.discovery.identity.instanceID, operationID: operationID,
+      systemDomain: failure is MoxError ? nil : underlying.domain,
+      systemCode: failure is MoxError ? nil : underlying.code))
+  }
+  public func diagnostics() async throws -> Data {
     struct Report: Encodable {
       let configuration: String
       let buildID: String
@@ -513,16 +557,37 @@ public struct LiveReply: Sendable {
       let errorCode: String?
       let operationFailure: StorageFailure?
       let saved: Bool?
+      let effectiveSampling: EffectiveSampling?
+      let runtimeBudgetBytes: Int?
+      let runtimeQueueCapacity: Int?
+      let runtimeQueueTimeoutSeconds: Int?
       let events: [DiagnosticEvent]
+      let serviceEvents: [DiagnosticEvent]
+      let serviceDiagnosticsStatus: String
       let workerOutput: WorkerOutputSnapshot?
     }
+    let serviceEvents: [DiagnosticEvent]
+    let diagnosticsStatus: String
+    if let client = connection?.client {
+      do { serviceEvents = try await client.diagnosticEvents(); diagnosticsStatus = "available" }
+      catch {
+        serviceEvents = []; diagnosticsStatus = "unavailable"
+        self.error = "服务诊断不可取得；已保留本机诊断，恢复连接后可重新导出。"
+      }
+    } else { serviceEvents = []; diagnosticsStatus = "disconnected" }
     return try Wire.encode(
       Report(
         configuration: BuildInfo.configuration, buildID: Wire.buildID,
         instanceID: connection?.client.discovery.identity.instanceID,
         requestID: live?.requestID, servicePhase: servicePhase, phase: live?.phase,
         errorCode: lastErrorCode?.rawValue ?? live?.error?.code.rawValue,
-        operationFailure: lastOperationFailure, saved: live?.saved, events: ring.events,
+        operationFailure: lastOperationFailure, saved: live?.saved,
+        effectiveSampling: effectiveSampling,
+        runtimeBudgetBytes: serviceState?.budgetBytes,
+        runtimeQueueCapacity: serviceState?.queueCapacity,
+        runtimeQueueTimeoutSeconds: serviceState?.queueTimeoutSeconds,
+        events: ring.events,
+        serviceEvents: serviceEvents, serviceDiagnosticsStatus: diagnosticsStatus,
         workerOutput: connection?.worker?.outputSnapshot))
   }
 }

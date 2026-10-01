@@ -3,6 +3,7 @@ import Foundation
 /// Local control-plane deadlines. Heartbeats must arrive before the request idle timeout.
 public enum ServiceTiming {
   public static let maximumStreamLifetime: TimeInterval = 24 * 60 * 60
+  public static let managementWorkTimeout: TimeInterval = 15 * 60
   public static let requestTimeout: TimeInterval = 15
   public static let cancellationRequestTimeout: TimeInterval = 2
   public static let shutdownSeconds: Double = 30

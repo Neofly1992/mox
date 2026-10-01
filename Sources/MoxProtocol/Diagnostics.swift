@@ -6,11 +6,20 @@ public struct DiagnosticEvent: Codable, Sendable {
   public let code: String
   public let instanceID: UUID?
   public let requestID: UUID?
-  public init(stage: String, code: String, instanceID: UUID? = nil, requestID: UUID? = nil) {
+  public let operationID: UUID?
+  public let systemDomain: String?
+  public let systemCode: Int?
+  public init(stage: String, code: String, instanceID: UUID? = nil, requestID: UUID? = nil,
+    operationID: UUID? = nil, systemDomain: String? = nil, systemCode: Int? = nil) {
     self.stage = String(stage.prefix(64))
     self.code = String(code.prefix(128))
     self.instanceID = instanceID
     self.requestID = requestID
+    self.operationID = operationID
+    let publicDomains: Set<String> = [NSCocoaErrorDomain, NSURLErrorDomain,
+      NSPOSIXErrorDomain, "OSStatus"]
+    self.systemDomain = systemDomain.map { publicDomains.contains($0) ? $0 : "OtherSystemError" }
+    self.systemCode = systemCode
   }
 }
 /// Events contain only producer-owned classifications/IDs; never upstream free-form text.

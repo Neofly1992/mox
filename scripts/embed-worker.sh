@@ -5,7 +5,12 @@ source_dir="$SRCROOT/.build/${milestone}-worker/$CONFIGURATION"
 helpers="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
 target_dir="$helpers/MoxWorker.app/Contents"
 if [[ ! -f "$source_dir/mox" || ! -f "$source_dir/mlx.metallib" ]]; then
-  echo 'Missing worker resources; run the matching milestone build script first.' >&2
+  echo "Missing $CONFIGURATION worker; run scripts/build-m4.sh $CONFIGURATION first." >&2
+  exit 1
+fi
+current_id=$(MOX_BUILD_MILESTONE=m4 python3 "$SRCROOT/scripts/stamp-m3-build.py" --check) || exit 1
+if [[ ! -f "$source_dir/BuildIdentity.swift" ]] || ! cmp -s "$source_dir/BuildIdentity.swift" "$SRCROOT/Sources/MoxProtocol/BuildIdentity.swift"; then
+  echo "Staged worker is stale ($current_id); run scripts/build-m4.sh $CONFIGURATION." >&2
   exit 1
 fi
 mkdir -p "$target_dir/MacOS" "$target_dir/Resources"

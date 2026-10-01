@@ -33,12 +33,19 @@ struct Chat: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Chat with a local MLX model directory or installed model alias.")
   @Option var dataRoot: String = ServiceFiles.defaultRoot
-  @Option var modelPath: String
+  @Option(help: "Absolute directory of a local MLX model.") var modelPath: String?
+  @Option(help: "Installed model alias or installation UUID.") var model: String?
   @Option var prompt: String?
-  @Option var maxTokens: Int = 2048
-  @Option var temperature: Float = 0.6
-  @Option var topP: Float = 1
+  @Option var maxTokens: Int?
+  @Option var temperature: Float?
+  @Option var topP: Float?
   mutating func run() async throws {
+    guard (modelPath == nil) != (model == nil) else {
+      diagnostic("Specify exactly one of --model-path or --model.")
+      throw ExitCode(2)
+    }
+    let modelReference = GenerateBody.Model(kind: model == nil ? "localDirectory" : "installedAlias",
+      path: model ?? modelPath!)
     let stdinFlags = fcntl(STDIN_FILENO, F_GETFL)
     let stdoutFlags = fcntl(STDOUT_FILENO, F_GETFL)
     let stderrFlags = fcntl(STDERR_FILENO, F_GETFL)
@@ -50,9 +57,8 @@ struct Chat: AsyncParsableCommand {
       _ = fcntl(STDOUT_FILENO, F_SETFL, stdoutFlags)
       _ = fcntl(STDERR_FILENO, F_SETFL, stderrFlags)
     }
-    let sampling: Sampling
-    do { sampling = try Sampling(maxTokens: maxTokens, temperature: temperature, topP: topP) } catch
-    {
+    let explicit = SamplingSettings(maxTokens: maxTokens, temperature: temperature, topP: topP)
+    do { try explicit.validate() } catch {
       diagnostic(String(describing: error))
       throw ExitCode(2)
     }
@@ -68,8 +74,19 @@ struct Chat: AsyncParsableCommand {
       diagnostic(String(describing: error))
       throw ExitCode(1)
     }
+    let effective: EffectiveSampling
+    do {
+      effective = try await connection.client.resolveSampling(
+        .init(model: modelReference, explicit: explicit))
+    } catch {
+      diagnostic(String(describing: error))
+      connection.worker?.requestStop()
+      if let worker = connection.worker, !(await worker.wait()) { await worker.forceStop() }
+      throw ExitCode(1)
+    }
+    diagnostic("sampling max_tokens=\(effective.maxTokens) [\(effective.maxTokensSource.rawValue)] temperature=\(effective.temperature) [\(effective.temperatureSource.rawValue)] top_p=\(effective.topP) [\(effective.topPSource.rawValue)]")
     let driver = await ChatDriver(
-      client: connection.client, modelPath: modelPath, sampling: sampling, oneShot: prompt != nil)
+      client: connection.client, model: modelReference, sampling: try effective.sampling(), oneShot: prompt != nil)
     let status = await driver.run(prompt: prompt)
     connection.worker?.requestStop()
     if let worker = connection.worker, !(await worker.wait()) { await worker.forceStop() }
@@ -84,7 +101,7 @@ func diagnostic(_ text: String) {
 
 @MainActor final class ChatDriver {
   let client: ServiceClient
-  let modelPath: String
+  let model: GenerateBody.Model
   let sampling: Sampling
   let oneShot: Bool
   var active: RemoteGeneration?
@@ -95,9 +112,9 @@ func diagnostic(_ text: String) {
   var input: DispatchSourceRead?
   var inputWaiter: CheckedContinuation<String?, Error>?
   var inputBuffer = Data()
-  init(client: ServiceClient, modelPath: String, sampling: Sampling, oneShot: Bool) {
+  init(client: ServiceClient, model: GenerateBody.Model, sampling: Sampling, oneShot: Bool) {
     self.client = client
-    self.modelPath = modelPath
+    self.model = model
     self.sampling = sampling
     self.oneShot = oneShot
   }
@@ -133,7 +150,7 @@ func diagnostic(_ text: String) {
       interruptedBeforeHandle = false
       do {
         let request = try session.request(prompt: text, sampling: sampling)
-        let handle = try client.generate(path: modelPath, request: request)
+        let handle = try client.generate(model: model, request: request)
         active = handle
         if interruptedBeforeHandle || exiting != nil { handle.cancel() }
         var reply = ""

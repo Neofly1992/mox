@@ -41,7 +41,8 @@ public actor PublicAPIManager {
     return difference == 0
   }
   public func restore() async {
-    guard (await downloads.snapshot()).configuration.publicAPIEnabled else { return }
+    do { guard try await downloads.configuration().publicAPIEnabled else { return } }
+    catch { failure = "storageFailed"; return }
     await acquireTransition()
     defer { releaseTransition() }
     do { try await start() }

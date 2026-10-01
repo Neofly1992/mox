@@ -35,6 +35,14 @@ import MoxServer
     if mode == "seed" {
       let store = try await ConversationStore.open(root: root)
       _ = try await store.create(modelPath: args[3])
+      // The workspace is backed by the service catalog, not conversation history.
+      let library = try await RuntimeStore.open(root: root)
+      let manager = try await DownloadManager.open(
+        persistence: library,
+        artifacts: ArtifactStore(root: root.appendingPathComponent("models")))
+      await manager.waitForRecovery()
+      _ = try await manager.importDirectory(path: args[3], alias: "ui-fixture")
+      await manager.shutdown()
       print("PASS seed")
       return
     }

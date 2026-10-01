@@ -8,7 +8,9 @@ import MoxProtocol
 struct Models: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Get and inspect managed MLX models.",
-    subcommands: [Plan.self, Pull.self, List.self, Show.self, Import.self, Remove.self, Select.self, Load.self, Unload.self, DownloadAction.self, Sources.self, DefaultSource.self])
+    subcommands: [Plan.self, Pull.self, List.self, Show.self, Import.self, Remove.self,
+      Select.self, Load.self, Unload.self, Pin.self, SamplingConfig.self,
+      DownloadAction.self, Sources.self, DefaultSource.self])
   private static func request(client: ServiceClient, provider: ModelProvider?,
     repository: String, revision: String?, variant: String, endpoint: String?
   ) async throws -> PullBody {
@@ -114,7 +116,9 @@ struct Models: AsyncParsableCommand {
       while true {
         let page = try await connection.client.library(
           installationOffset: installOffset, operationOffset: operationOffset)
-        for item in page.installations { print("\(item.id)  \(item.alias)  \(item.path)") }
+        for item in page.installations {
+          print("\(item.id)  \(item.alias)\(item.pinned ? " [pinned]" : "")  \(item.path)")
+        }
         for item in page.operations where item.phase != .installed {
           print("\(item.id)  \(item.phase.rawValue)  \(item.origin.repository)")
         }
@@ -132,7 +136,7 @@ struct Models: AsyncParsableCommand {
       let connection = try await Connection.open(root: dataRoot, executable: ExecutableLocation.current())
       defer { connection.worker?.requestStop() }
       let model = try await connection.client.model(value)
-      print("\(model.id)  \(model.alias)  \(model.availability.rawValue)  \(model.path)")
+      print("\(model.id)  \(model.alias)  \(model.availability.rawValue)  \(model.path)\(model.pinned ? " [pinned]" : "")")
     }
   }
   struct Import: AsyncParsableCommand {
@@ -190,6 +194,76 @@ struct Models: AsyncParsableCommand {
       defer { connection.worker?.requestStop() }
       _ = try await connection.client.modelAction(value, "unload")
       print("unloaded \(value)")
+    }
+  }
+  struct Pin: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Keep a resident model from automatic eviction.")
+    @Option var dataRoot: String = ServiceFiles.defaultRoot
+    @Flag(help: "Remove the pin.") var off = false
+    @Argument var id: String
+    mutating func run() async throws {
+      guard let value = UUID(uuidString: id) else { throw ValidationError("Expected model UUID.") }
+      let connection = try await Connection.open(root: dataRoot, executable: ExecutableLocation.current())
+      defer { connection.worker?.requestStop() }
+      let revision = try await connection.client.library().configuration.revision
+      let item = try await connection.client.setModelPinned(value,
+        .init(expectedRevision: revision, pinned: !off))
+      print("\(item.alias): \(item.pinned ? "pinned" : "not pinned")")
+    }
+  }
+  struct SamplingConfig: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "sampling",
+      abstract: "Set global or per-model generation defaults; omit ID for global settings.")
+    @Option var dataRoot: String = ServiceFiles.defaultRoot
+    @Option var maxTokens: Int?
+    @Option var temperature: Float?
+    @Option var topP: Float?
+    @Flag var inheritMaxTokens = false
+    @Flag var inheritTemperature = false
+    @Flag var inheritTopP = false
+    @Argument var id: String?
+    mutating func run() async throws {
+      let connection = try await Connection.open(root: dataRoot, executable: ExecutableLocation.current())
+      defer { connection.worker?.requestStop() }
+      let library = try await connection.client.library()
+      let modelID = try id.map { value -> UUID in
+        guard let uuid = UUID(uuidString: value) else { throw ValidationError("Expected model UUID.") }
+        return uuid
+      }
+      let model: ModelInstallationSummary?
+      if let modelID { model = try await connection.client.model(modelID) }
+      else { model = nil }
+      var settings = model?.samplingSettings ?? library.configuration.globalSampling
+      let changed = maxTokens != nil || temperature != nil || topP != nil
+        || inheritMaxTokens || inheritTemperature || inheritTopP
+      if !changed {
+        if let model {
+          let effective = try await connection.client.resolveSampling(.init(
+            model: .init(kind: "installedAlias", path: model.alias)))
+          print("max_tokens=\(effective.maxTokens) [\(effective.maxTokensSource.rawValue)] temperature=\(effective.temperature) [\(effective.temperatureSource.rawValue)] top_p=\(effective.topP) [\(effective.topPSource.rawValue)]")
+        } else {
+          print("global max_tokens=\(settings.maxTokens.map { String($0) } ?? "product") temperature=\(settings.temperature.map { String($0) } ?? "product") top_p=\(settings.topP.map { String($0) } ?? "product")")
+        }
+        return
+      }
+      guard !(maxTokens != nil && inheritMaxTokens),
+        !(temperature != nil && inheritTemperature), !(topP != nil && inheritTopP)
+      else { throw ValidationError("A parameter cannot be set and inherited together.") }
+      if let maxTokens { settings.maxTokens = maxTokens }
+      if let temperature { settings.temperature = temperature }
+      if let topP { settings.topP = topP }
+      if inheritMaxTokens { settings.maxTokens = nil }
+      if inheritTemperature { settings.temperature = nil }
+      if inheritTopP { settings.topP = nil }
+      try settings.validate()
+      if let modelID {
+        _ = try await connection.client.setModelSampling(modelID,
+          .init(expectedRevision: library.configuration.revision, settings: settings))
+      } else {
+        _ = try await connection.client.setGlobalSampling(
+          .init(expectedRevision: library.configuration.revision, settings: settings))
+      }
+      print("sampling saved; revision \(library.configuration.revision + 1)")
     }
   }
   struct DownloadAction: AsyncParsableCommand {

@@ -31,7 +31,7 @@ final class MoxUITests: XCTestCase {
     try seed(root)
     app.launchEnvironment["MOX_DATA_ROOT"] = root
     app.launch()
-    let model = app.buttons["localModelRow"].firstMatch
+    let model = app.buttons["installedModelDetails"].firstMatch
     XCTAssertTrue(model.waitForExistence(timeout: 20))
     XCTAssertFalse(app.textViews["composer"].exists)
     model.click()
@@ -157,7 +157,7 @@ extension MoxUITests {
     try seed(root)
     let fixture = Process()
     fixture.executableURL = URL(
-      fileURLWithPath: repositoryURL.appendingPathComponent(".build/m2-tests/debug/MoxTestSupport")
+      fileURLWithPath: repositoryURL.appendingPathComponent(".build/xcode/Build/Products/Debug/MoxTestSupport")
         .path)
     fixture.arguments = ["serve", root]
     fixture.standardOutput = FileHandle.standardOutput
@@ -238,7 +238,7 @@ extension MoxUITests {
   fileprivate func seed(_ root: String, mode: String = "seed") throws {
     let process = Process()
     process.executableURL = URL(
-      fileURLWithPath: repositoryURL.appendingPathComponent(".build/m2-tests/debug/MoxTestSupport")
+      fileURLWithPath: repositoryURL.appendingPathComponent(".build/xcode/Build/Products/Debug/MoxTestSupport")
         .path)
     process.arguments = [
       mode, root,
@@ -272,7 +272,7 @@ extension MoxUITests {
     try seed(root)
     let fixture = Process()
     fixture.executableURL = URL(
-      fileURLWithPath: repositoryURL.appendingPathComponent(".build/m2-tests/debug/MoxTestSupport")
+      fileURLWithPath: repositoryURL.appendingPathComponent(".build/xcode/Build/Products/Debug/MoxTestSupport")
         .path)
     fixture.arguments = ["serve", root]
     try fixture.run()
@@ -330,7 +330,7 @@ extension MoxUITests {
     try seed(root)
     let fixture = Process()
     fixture.executableURL = URL(
-      fileURLWithPath: repositoryURL.appendingPathComponent(".build/m2-tests/debug/MoxTestSupport")
+      fileURLWithPath: repositoryURL.appendingPathComponent(".build/xcode/Build/Products/Debug/MoxTestSupport")
         .path)
     fixture.arguments = ["serve", root]
     try fixture.run()
@@ -384,7 +384,7 @@ extension MoxUITests {
       let fixture = Process()
       fixture.executableURL = URL(
         fileURLWithPath: repositoryURL.appendingPathComponent(
-          ".build/m2-tests/debug/MoxTestSupport"
+          ".build/xcode/Build/Products/Debug/MoxTestSupport"
         ).path)
       fixture.arguments = ["serve", root]
       try fixture.run()

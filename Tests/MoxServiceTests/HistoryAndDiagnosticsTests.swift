@@ -111,6 +111,7 @@ func storeOpenDiagnosticsPreserveSafeMetadata(domain: String) async throws {
   #expect(failure["domain"] as? String == domain)
   #expect(failure["systemCode"] as? Int == systemCode)
   #expect(json["errorCode"] as? String == "storageFailed")
+  #expect(json["serviceDiagnosticsStatus"] as? String == "disconnected")
   #expect(!String(decoding: data, as: UTF8.self).contains(sentinel))
   #expect(try Data(contentsOf: marker) == Data(sentinel.utf8))
 }
@@ -151,61 +152,59 @@ func storeOpenDiagnosticsPreserveSafeMetadata(domain: String) async throws {
   }
 }
 
-@Test func migrationPreservesMessagesAndCompactsRequestSnapshots() async throws {
+@Test func initialChatSchemaReopensWithCompactRequests() async throws {
   let root = try temporaryRoot()
   defer { try? FileManager.default.removeItem(at: root) }
   let directory = root.appendingPathComponent("conversations")
   try ServiceFiles.secureDirectory(directory)
-  let cid = UUID()
-  let aid = try await writeLegacyConversation(directory: directory, conversationID: cid)
+  let conversationID = UUID()
+  let attemptID = try await writeInitialConversation(
+    directory: directory, conversationID: conversationID)
   let store = try await ConversationStore.open(root: root)
-  let detail = try await store.detail(cid)
+  let detail = try await store.detail(conversationID)
   #expect(detail.attempts.count == 1)
-  #expect(detail.attempts[0].id == aid)
-  #expect(detail.attempts[0].prompt == "legacy question")
-  #expect(detail.attempts[0].reply == "legacy answer")
-  #expect(detail.selectedLeafID == aid)
+  #expect(detail.attempts[0].id == attemptID)
+  #expect(detail.attempts[0].prompt == "question")
+  #expect(detail.attempts[0].reply == "answer")
+  #expect(detail.selectedLeafID == attemptID)
   let next = try await store.begin(
-    conversationID: cid, prompt: "next", modelPath: "/fixture", sampling: Sampling())
+    conversationID: conversationID, prompt: "next", modelPath: "/fixture", sampling: Sampling())
   #expect(next.request.messages.count == 3)
-  let container = await store.modelContainer
-  try await MainActor.run {
-    let context = ModelContext(container)
-    let attempts = try context.fetch(FetchDescriptor<ChatSchema.Attempt>())
-    #expect(attempts.count == 2)
-    for attempt in attempts {
-      #expect(attempt.requestParameters.count < 128)
-      #expect(!String(decoding: attempt.requestParameters, as: UTF8.self).contains("messages"))
-    }
+  let container = store.modelContainer
+  let context = ModelContext(container)
+  let attempts = try context.fetch(FetchDescriptor<ChatSchema.Attempt>())
+  #expect(attempts.count == 2)
+  for attempt in attempts {
+    #expect(attempt.requestParameters.count < 128)
+    #expect(!String(decoding: attempt.requestParameters, as: UTF8.self).contains("messages"))
   }
 }
 
-@MainActor private func writeLegacyConversation(directory: URL, conversationID: UUID) async throws
+@MainActor private func writeInitialConversation(directory: URL, conversationID: UUID) async throws
   -> UUID
 {
-  let container = try await ConversationContainerFactory.shared.create(
-    in: directory,
-    schema: ChatSchemaV1.self, migrationPlan: nil)
+  let container = try await ConversationContainerFactory.shared.create(in: directory)
   let context = ModelContext(container)
-  let c = ChatSchemaV1.Conversation(id: conversationID, title: "legacy", localModelPath: "/fixture")
-  let user = try ChatSchemaV1.MessageRecord(
+  let conversation = ChatSchema.Conversation(
+    id: conversationID, title: "saved", localModelPath: "/fixture")
+  let user = try ChatSchema.MessageRecord(
     id: UUID(), conversationID: conversationID,
-    parentID: nil, sequence: 0, role: "user", text: "legacy question")
-  let reply = try ChatSchemaV1.MessageRecord(
+    parentID: nil, sequence: 0, role: "user", text: "question")
+  let reply = try ChatSchema.MessageRecord(
     id: UUID(), conversationID: conversationID,
-    parentID: user.id, sequence: 1, role: "assistant", text: "legacy answer")
+    parentID: user.id, sequence: 1, role: "assistant", text: "answer")
   let request = try GenerationRequest(
-    messages: [.init(role: .user, text: "legacy question")], sampling: Sampling())
-  let a = try ChatSchemaV1.Attempt(
+    messages: [.init(role: .user, text: "question")], sampling: Sampling())
+  let attempt = try ChatSchema.Attempt(
     conversationID: conversationID, userMessageID: user.id,
     assistantMessageID: reply.id, parentAttemptID: nil, retryOfID: nil,
-    body: GenerateBody(path: "/fixture", request: request))
-  a.status = "stop"
-  c.selectedLeafID = a.id
-  context.insert(c)
+    modelPath: "/fixture", request: request)
+  attempt.status = "stop"
+  conversation.selectedLeafID = attempt.id
+  context.insert(conversation)
   context.insert(user)
   context.insert(reply)
-  context.insert(a)
+  context.insert(attempt)
   try context.save()
-  return a.id
+  return attempt.id
 }

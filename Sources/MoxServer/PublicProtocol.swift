@@ -7,8 +7,18 @@ struct PublicCall: Sendable {
   let dialect: PublicDialect
   let model: String
   let request: GenerationRequest
+  let explicitSampling: SamplingSettings
   let stream: Bool
   let includeUsage: Bool
+  init(dialect: PublicDialect, model: String, request: GenerationRequest,
+    explicitSampling: SamplingSettings = .init(), stream: Bool, includeUsage: Bool) {
+    self.dialect = dialect
+    self.model = model
+    self.request = request
+    self.explicitSampling = explicitSampling
+    self.stream = stream
+    self.includeUsage = includeUsage
+  }
 }
 
 enum PublicProtocol {
@@ -171,13 +181,15 @@ enum PublicProtocol {
       }
       return Message(role: domainRole, content: blocks)
     }
-    let sampling = try Sampling(maxTokens: root["max_tokens"].map { try int($0, at: "max_tokens") } ?? 2048,
-      temperature: root["temperature"].map { try float($0, at: "temperature") } ?? 0.6,
-      topP: root["top_p"].map { try float($0, at: "top_p") } ?? 1)
+    let explicit = try SamplingSettings(
+      maxTokens: root["max_tokens"].map { try int($0, at: "max_tokens") },
+      temperature: root["temperature"].map { try float($0, at: "temperature") },
+      topP: root["top_p"].map { try float($0, at: "top_p") })
+    let sampling = try EffectiveSampling.resolve(request: explicit).sampling()
     return PublicCall(dialect: .openAI, model: model,
       request: try GenerationRequest(messages: messages, sampling: sampling,
         stopSequences: stops(root["stop"], at: "stop"), tools: definitions, toolChoice: selected),
-      stream: stream, includeUsage: includeUsage)
+      explicitSampling: explicit, stream: stream, includeUsage: includeUsage)
   }
   private static func anthropic(_ value: Any) throws -> PublicCall {
     let root = try object(value, ["model", "messages", "system", "max_tokens", "stream", "temperature", "top_p", "stop_sequences", "tools", "tool_choice"], at: "request")
@@ -221,13 +233,15 @@ enum PublicProtocol {
     let definitions = try tools(root["tools"], anthropic: true)
     let selected = try choice(root["tool_choice"], at: "tool_choice", anthropic: true)
       ?? (definitions.isEmpty ? .none : .auto)
-    let sampling = try Sampling(maxTokens: int(root["max_tokens"], at: "max_tokens"),
-      temperature: root["temperature"].map { try float($0, at: "temperature") } ?? 0.6,
-      topP: root["top_p"].map { try float($0, at: "top_p") } ?? 1)
+    let explicit = try SamplingSettings(maxTokens: int(root["max_tokens"], at: "max_tokens"),
+      temperature: root["temperature"].map { try float($0, at: "temperature") },
+      topP: root["top_p"].map { try float($0, at: "top_p") })
+    let sampling = try EffectiveSampling.resolve(request: explicit).sampling()
     return PublicCall(dialect: .anthropic, model: model,
       request: try GenerationRequest(messages: messages, sampling: sampling,
         stopSequences: stops(root["stop_sequences"], at: "stop_sequences"),
-        tools: definitions, toolChoice: selected), stream: try root["stream"].map { try bool($0, at: "stream") } ?? false,
+        tools: definitions, toolChoice: selected), explicitSampling: explicit,
+      stream: try root["stream"].map { try bool($0, at: "stream") } ?? false,
       includeUsage: true)
   }
 }

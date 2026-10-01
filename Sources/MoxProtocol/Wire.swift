@@ -95,34 +95,41 @@ public struct GenerateBody: Codable, Sendable {
   public struct Model: Codable, Sendable {
     public var kind: String
     public var path: String
-    public init(kind: String, path: String) { self.kind = kind; self.path = path }
+    public init(kind: String, path: String) {
+      self.kind = kind
+      self.path = path
+    }
   }
   public struct Parameters: Codable, Sendable {
-    public var maxTokens: Int
-    public var temperature: Float
-    public var topP: Float
+    public var maxTokens: Int?
+    public var temperature: Float?
+    public var topP: Float?
   }
   public var requestID: UUID
   public var model: Model
   public var messages: [WireMessage]
   public var sampling: Parameters
+  public var samplingSettings: SamplingSettings {
+    .init(maxTokens: sampling.maxTokens, temperature: sampling.temperature, topP: sampling.topP)
+  }
   public init(path: String, request: GenerationRequest) throws {
+    try self.init(model: Model(kind: "localDirectory", path: path), request: request)
+  }
+  public init(model: Model, request: GenerationRequest) throws {
     requestID = request.id
-    model = Model(kind: path.hasPrefix(ArtifactOrigin.aliasPrefix) ? "installedAlias" : "localDirectory",
-      path: path)
+    self.model = model
     messages = try request.messages.map(WireMessage.init)
     sampling = Parameters(
       maxTokens: request.sampling.maxTokens, temperature: request.sampling.temperature,
       topP: request.sampling.topP)
   }
-  public func domain() throws -> GenerationRequest {
+  public func domain(sampling resolved: Sampling? = nil) throws -> GenerationRequest {
     guard model.kind == "localDirectory" || model.kind == "installedAlias" else {
       throw MoxError(.unsupportedInput, "Select a local model directory or installed alias.")
     }
     return try GenerationRequest(
       id: requestID, messages: messages.map { try $0.domain() },
-      sampling: Sampling(
-        maxTokens: sampling.maxTokens, temperature: sampling.temperature, topP: sampling.topP))
+      sampling: try resolved ?? EffectiveSampling.resolve(request: samplingSettings).sampling())
   }
   public static func decode(_ data: Data) throws -> Self {
     func keys(_ object: Any?, _ allowed: Set<String>) throws -> [String: Any] {
@@ -198,7 +205,8 @@ public struct EventFrame: Codable, Sendable {
     case "contentDelta" where text != nil: payload = .contentDelta(text!)
     case "toolCall" where toolCallID != nil && toolName != nil && toolArguments != nil:
       payload = .toolCall(id: toolCallID!, name: toolName!, arguments: toolArguments!)
-    case "matchedStopSequence" where stopSequence != nil: payload = .matchedStopSequence(stopSequence!)
+    case "matchedStopSequence" where stopSequence != nil:
+      payload = .matchedStopSequence(stopSequence!)
     case "usage" where usage != nil: payload = .usage(usage!)
     case "finished" where reason != nil: payload = .finished(reason!)
     case "failed" where error != nil: payload = .failed(error!)
@@ -277,12 +285,19 @@ public struct ServiceState: Codable, Sendable {
   public var reservedBytes: Int
   public var activeLeases: Int
   public var queued: Int
+  public var budgetBytes: Int
+  public var queueCapacity: Int
+  public var queueTimeoutSeconds: Int
+  public var libraryRecovery: LibraryRecoveryState
+  public var activeDownloads: Int
   public var models: [ModelState]
   public var requests: [RequestState]
   public init(
     instanceID: UUID, revision: UInt64, serviceState: String, ownership: ServiceOwnership,
-    residentModels: Int, reservedBytes: Int, activeLeases: Int, queued: Int, models: [ModelState],
-    requests: [RequestState]
+    residentModels: Int, reservedBytes: Int, activeLeases: Int, queued: Int,
+    budgetBytes: Int, queueCapacity: Int, queueTimeoutSeconds: Int,
+    activeDownloads: Int, models: [ModelState],
+    requests: [RequestState], libraryRecovery: LibraryRecoveryState = .init()
   ) {
     self.instanceID = instanceID
     self.revision = revision
@@ -292,6 +307,11 @@ public struct ServiceState: Codable, Sendable {
     self.reservedBytes = reservedBytes
     self.activeLeases = activeLeases
     self.queued = queued
+    self.budgetBytes = budgetBytes
+    self.queueCapacity = queueCapacity
+    self.queueTimeoutSeconds = queueTimeoutSeconds
+    self.libraryRecovery = libraryRecovery
+    self.activeDownloads = activeDownloads
     self.models = models
     self.requests = requests
   }
@@ -314,37 +334,86 @@ public struct PullBody: Codable, Sendable {
   public let repository: String
   public let selector: String
   public let variant: String
-  public init(provider: ModelProvider, endpoint: URL, registryID: UUID, repository: String, selector: String, variant: String = "") {
+  public init(
+    provider: ModelProvider, endpoint: URL, registryID: UUID, repository: String, selector: String,
+    variant: String = ""
+  ) {
     self.variant = variant
-    self.provider = provider; self.endpoint = endpoint; self.registryID = registryID
-    self.repository = repository; self.selector = selector
+    self.provider = provider
+    self.endpoint = endpoint
+    self.registryID = registryID
+    self.repository = repository
+    self.selector = selector
   }
 }
-public struct DownloadCreated: Codable, Sendable { public let id: UUID; public init(id: UUID) { self.id = id } }
+public struct DownloadCreated: Codable, Sendable {
+  public let id: UUID
+  public init(id: UUID) { self.id = id }
+}
 
 public struct RegistryUpdate: Codable, Sendable {
   public let expectedRevision: UInt64
   public let registry: ModelRegistry
   public let credential: String?
   public let mirrorCredential: String?
-  public init(expectedRevision: UInt64, registry: ModelRegistry,
+  public init(
+    expectedRevision: UInt64, registry: ModelRegistry,
     credential: String? = nil, mirrorCredential: String? = nil
   ) {
-    self.expectedRevision = expectedRevision; self.registry = registry
-    self.credential = credential; self.mirrorCredential = mirrorCredential
+    self.expectedRevision = expectedRevision
+    self.registry = registry
+    self.credential = credential
+    self.mirrorCredential = mirrorCredential
+  }
+}
+
+public struct SamplingResolutionBody: Codable, Sendable {
+  public let model: GenerateBody.Model
+  public let explicit: SamplingSettings
+  public init(model: GenerateBody.Model, explicit: SamplingSettings = .init()) {
+    self.model = model
+    self.explicit = explicit
+  }
+}
+public struct GlobalSamplingUpdate: Codable, Sendable {
+  public let expectedRevision: UInt64
+  public let settings: SamplingSettings
+  public init(expectedRevision: UInt64, settings: SamplingSettings) {
+    self.expectedRevision = expectedRevision
+    self.settings = settings
+  }
+}
+public struct ModelSamplingUpdate: Codable, Sendable {
+  public let expectedRevision: UInt64
+  public let settings: SamplingSettings
+  public init(expectedRevision: UInt64, settings: SamplingSettings) {
+    self.expectedRevision = expectedRevision
+    self.settings = settings
+  }
+}
+public struct ModelPinUpdate: Codable, Sendable {
+  public let expectedRevision: UInt64
+  public let pinned: Bool
+  public init(expectedRevision: UInt64, pinned: Bool) {
+    self.expectedRevision = expectedRevision
+    self.pinned = pinned
   }
 }
 
 public struct ModelImportBody: Codable, Sendable {
   public let path: String
   public let alias: String
-  public init(path: String, alias: String) { self.path = path; self.alias = alias }
+  public init(path: String, alias: String) {
+    self.path = path
+    self.alias = alias
+  }
 }
 
 public struct DefaultRegistryUpdate: Codable, Sendable {
   public let expectedRevision: UInt64
   public let registryID: UUID
   public init(expectedRevision: UInt64, registryID: UUID) {
-    self.expectedRevision = expectedRevision; self.registryID = registryID
+    self.expectedRevision = expectedRevision
+    self.registryID = registryID
   }
 }

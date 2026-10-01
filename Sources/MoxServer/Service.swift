@@ -28,7 +28,6 @@ public actor InferenceService {
   private let token: String
   private let runtime: RuntimeCoordinator
   private let downloads: DownloadManager?
-  private let sources: (any ModelSourceFactory)?
   private var publicAPI: PublicAPIManager?
   private var handles: [UUID: GenerationHandle] = [:]
   private var publicRequestIDs = Set<UUID>()
@@ -37,63 +36,140 @@ public actor InferenceService {
   private var seen = Set<UUID>()
   private var revision: UInt64 = 0
   private var draining = false
-  private var submittingPaths = Set<String>()
-  private var removingPaths = Set<String>()
+  private let library: ModelLibraryService
+  private var diagnostics = DiagnosticRing()
   public init(
     identity: ServiceIdentity, token: String, runtime: RuntimeCoordinator,
-    downloads: DownloadManager? = nil, sources: (any ModelSourceFactory)? = nil
+    downloads: DownloadManager? = nil, sources: (any ModelSourceFactory)? = nil,
+    launchSampling: SamplingSettings = .init()
   ) {
     self.identity = identity
     self.token = token
     self.runtime = runtime
     self.downloads = downloads
-    self.sources = sources
+    self.library = ModelLibraryService(
+      downloads: downloads, runtime: runtime,
+      sources: sources, launchSampling: launchSampling)
   }
-  private func resolvePull(_ body: PullBody, downloads: DownloadManager,
-    sources: any ModelSourceFactory
-  ) async throws -> (any ResolvedModelSource, ArtifactManifest, URL) {
-    let registry = try await downloads.registry(body.registryID)
-    guard registry.provider == body.provider else {
-      throw MoxError(.invalidParameters, "Source protocol does not match its configuration.")
-    }
-    let endpoint = registry.mirror ?? registry.origin
-    guard body.endpoint == endpoint else {
-      throw MoxError(.invalidParameters, "Selected source endpoint changed; refresh its settings.")
-    }
-    let source = try sources.make(provider: registry.provider, endpoint: endpoint,
-      credentialReference: registry.credentialReference(for: endpoint))
-    let manifest = try await source.resolve(registryID: body.registryID,
-      repository: body.repository, selector: body.selector, variant: body.variant)
-    return (source, manifest, endpoint)
-  }
+  public func restoreLibrarySettings() async throws { try await library.restoreRuntimeSettings() }
   public func shutdown() async {
     draining = true
     revision &+= 1
     await publicAPI?.shutdown()
+    let active = Array(handles.values)
+    active.forEach { $0.cancel() }
+    for handle in active { await handle.waitUntilStopped() }
     await downloads?.shutdown()
     await runtime.shutdown()
   }
   public func attachPublicAPI(_ manager: PublicAPIManager) { publicAPI = manager }
-  public func publicModels() async throws -> Data {
-    guard let downloads else { throw MoxError(.shuttingDown, "Model library is unavailable.") }
-    let models = await downloads.snapshot().installations.filter {
-      $0.availability == .ready && !$0.deletionPending
-    }.map { ["id": $0.alias, "object": "model", "created": 0,
-      "owned_by": "mox"] as [String: Any] }
-    return try JSONSerialization.data(withJSONObject: ["object": "list", "data": models])
+  private func recordFailure(_ failure: Error, path: String) {
+    let stage: String
+    switch path {
+    case "/mox/v1/public-api", "/mox/v1/public-api/rotate": stage = "public.control"
+    case "/mox/v1/registries", "/mox/v1/config/default": stage = "source.configuration"
+    case "/mox/v1/downloads", "/mox/v1/downloads/plan": stage = "download.create"
+    case "/mox/v1/models/import": stage = "model.import"
+    default:
+      stage =
+        path.hasPrefix("/mox/v1/downloads/")
+        ? "download.action"
+        : path.hasPrefix("/mox/v1/models/") ? "model.action" : "server.management"
+    }
+    let nsError = failure as NSError
+    diagnostics.record(
+      .init(
+        stage: stage,
+        code: (failure as? MoxError)?.code.rawValue ?? "internalFailure",
+        instanceID: identity.instanceID,
+        systemDomain: failure is MoxError ? nil : nsError.domain,
+        systemCode: failure is MoxError ? nil : nsError.code))
   }
-  public func beginPublic(model: String, request: GenerationRequest) async throws -> GenerationHandle {
-    guard let downloads else { throw MoxError(.shuttingDown, "Model library is unavailable.") }
-    guard let item = await downloads.snapshot().installations.first(where: {
-      ($0.alias == model || $0.id.uuidString == model) && $0.availability == .ready
-        && !$0.deletionPending
-    }) else { throw MoxError(.notFound, "Installed model was not found.") }
-    if request.toolChoice == .auto {
-      guard VerifiedToolModel.supports(item), try LocalModel(path: item.path).modelType == "qwen3" else {
-        throw MoxError(.unsupportedInput, "This model has no verified tool-call capability.")
+  public func diagnosticEvents() async -> [DiagnosticEvent] {
+    var events = diagnostics.events
+    events += await library.diagnosticEvents().map {
+      DiagnosticEvent(stage: $0.stage, code: $0.code, instanceID: identity.instanceID)
+    }
+    if let downloads {
+      do {
+        events += try await downloads.diagnosticOperations().compactMap { operation in
+          guard
+            operation.phase.isActive || operation.phase == .failed
+              || operation.phase == .interrupted
+          else { return nil }
+          return DiagnosticEvent(
+            stage: "download.\(operation.phase.rawValue)",
+            code: operation.errorCode ?? operation.phase.rawValue,
+            instanceID: identity.instanceID, operationID: operation.id,
+            systemDomain: operation.failureDomain, systemCode: operation.failureSystemCode)
+        }
+      } catch {
+        events.append(
+          .init(
+            stage: "download.diagnostics", code: "storageFailed", instanceID: identity.instanceID))
       }
     }
-    let handle = try await begin(model: .init(kind: "localDirectory", path: item.path), request: request)
+    if let publicAPI, let code = await publicAPI.status().errorCode {
+      events.append(
+        .init(
+          stage: "public.listener", code: code,
+          instanceID: identity.instanceID))
+    }
+    if let recovery = await downloads?.recoveryStatus(), recovery.phase == .failed {
+      events.append(
+        .init(
+          stage: "library.recovery", code: recovery.errorCode ?? "storageFailed",
+          instanceID: identity.instanceID))
+    }
+    return Array(events.suffix(256))
+  }
+  public func publicModels() async throws -> Data {
+    guard let downloads else { throw MoxError(.shuttingDown, "Model library is unavailable.") }
+    var items: [ModelInstallationSummary] = []
+    var offset = 0
+    while true {
+      let page = try await downloads.installationSummaries(offset: offset)
+      items += page
+      if page.count < 100 { break }
+      offset += page.count
+    }
+    let models = items.filter {
+      ($0.availability == .ready || $0.availability == .checking) && !$0.deletionPending
+    }.map {
+      [
+        "id": $0.alias, "object": "model", "created": 0,
+        "owned_by": "mox",
+      ] as [String: Any]
+    }
+    return try JSONSerialization.data(withJSONObject: ["object": "list", "data": models])
+  }
+  public func resolveSampling(
+    model: GenerateBody.Model,
+    explicit: SamplingSettings = .init()
+  ) async throws -> EffectiveSampling {
+    try await library.resolveSampling(try modelReference(model), explicit: explicit)
+  }
+  private func modelReference(_ model: GenerateBody.Model) throws -> ModelReference {
+    switch model.kind {
+    case "installedAlias": return .installed(model.path)
+    case "localDirectory": return .directory(model.path)
+    default: throw MoxError(.invalidParameters, "Unknown model reference kind.")
+    }
+  }
+  public func beginPublic(model: String, request: GenerationRequest) async throws
+    -> GenerationHandle
+  {
+    try await beginPublic(
+      model: model, request: request,
+      explicitSampling: SamplingSettings(request.sampling))
+  }
+  public func beginPublic(
+    model: String, request: GenerationRequest,
+    explicitSampling: SamplingSettings
+  ) async throws -> GenerationHandle {
+    let handle = try await begin(
+      model: .init(kind: "installedAlias", path: model),
+      request: request, explicitSampling: explicitSampling, requireVerifiedTools: true)
     publicRequestIDs.insert(request.id)
     return handle
   }
@@ -113,23 +189,36 @@ public actor InferenceService {
       states.removeValue(forKey: first.0)
     }
   }
-  public func snapshot() async -> ServiceState {
+  public func snapshot() async throws -> ServiceState {
     prune()
     let snap = await runtime.snapshot()
     let models = await runtime.modelStates().map { ModelState(modelID: $0.id, state: $0.state) }
+    let activeDownloads = try await downloads?.activeOperationCount() ?? 0
     return ServiceState(
       instanceID: identity.instanceID, revision: revision,
       serviceState: draining ? "draining" : "running", ownership: identity.ownership,
       residentModels: snap.residentModels, reservedBytes: snap.reservedBytes,
-      activeLeases: snap.activeLeases, queued: snap.queued, models: models,
+      activeLeases: snap.activeLeases, queued: snap.queued,
+      budgetBytes: snap.budgetBytes, queueCapacity: snap.queueCapacity,
+      queueTimeoutSeconds: snap.queueTimeoutSeconds,
+      activeDownloads: activeDownloads, models: models,
       requests: states.values.filter { $0.terminal == nil }.sorted {
         $0.requestID.uuidString < $1.requestID.uuidString
-      })
+      }, libraryRecovery: await downloads?.recoveryStatus() ?? .init())
   }
-  private func begin(_ body: GenerateBody) async throws -> GenerationHandle {
-    try await begin(model: body.model, request: body.domain())
+  private func begin(_ body: GenerateBody, output: GenerationHandle) async throws
+    -> GenerationHandle
+  {
+    try await begin(
+      model: body.model, request: body.domain(), explicitSampling: body.samplingSettings,
+      output: output)
   }
-  private func begin(model: GenerateBody.Model, request: GenerationRequest) async throws -> GenerationHandle {
+  private func begin(
+    model: GenerateBody.Model, request: GenerationRequest,
+    explicitSampling: SamplingSettings, requireVerifiedTools: Bool = false,
+    output: GenerationHandle? = nil
+  ) async throws -> GenerationHandle {
+    let reference = try modelReference(model)
     guard !draining else { throw MoxError(.shuttingDown, "Service is stopping.") }
     guard !seen.contains(request.id) else {
       throw MoxError(.busy, "Request ID was already submitted; do not replay it.")
@@ -137,33 +226,21 @@ public actor InferenceService {
     guard seen.count < ServiceCapacity.rememberedRequestIDs else {
       throw MoxError(.resourceLimit, "Request identity capacity reached; restart the idle service.")
     }
-    // Freeze deletion admission before validating and waiting for runtime resources.
-    let reference: String
-    if model.kind == "installedAlias" {
-      guard let item = await downloads?.snapshot().installations.first(where: {
-        $0.alias == model.path && $0.availability == .ready && !$0.deletionPending
-      }) else { throw MoxError(.notFound, "Installed model alias is unavailable.") }
-      reference = item.path
-    } else {
-      reference = model.path
-    }
-    let path = URL(fileURLWithPath: reference).standardizedFileURL.resolvingSymlinksInPath().path
-    if let installation = await downloads?.snapshot().installations.first(where: { $0.path == path }),
-      installation.availability != .ready || installation.deletionPending
-    {
-      throw MoxError(.invalidModel, "Managed model is unavailable; inspect or remove the installation.")
-    }
-    guard !removingPaths.contains(path) else {
-      throw MoxError(.busy, "Model removal is in progress.")
-    }
-    submittingPaths.insert(path)
-    defer { submittingPaths.remove(path) }
-    let model = try LocalModel(path: path)
     seen.insert(request.id)
-    let handle = try await runtime.generate(model: model, request: request)
+    let handle = output ?? GenerationHandle(requestID: request.id)
     handles[request.id] = handle
-    states[request.id] = .init(requestID: request.id, modelID: model.id)
+    states[request.id] = .init(requestID: request.id, modelID: "preparing", phase: "preparing")
     revision &+= 1
+    do {
+      let modelID = try await library.startGeneration(
+        reference, request: request,
+        explicitSampling: explicitSampling, requireVerifiedTools: requireVerifiedTools,
+        output: handle)
+      states[request.id]?.modelID = modelID
+    } catch {
+      for await event in handle.events { observe(event) }
+      throw error
+    }
     return handle
   }
   private func observe(_ event: GenerationEvent) {
@@ -195,6 +272,9 @@ public actor InferenceService {
     return state
   }
   func response(_ request: Request, context: ServiceContext) async -> Response {
+    var bodyConsumed =
+      request.headers[.transferEncoding] == nil
+      && (request.headers[.contentLength].flatMap(Int.init) ?? 0) == 0
     do {
       guard request.headers[.origin] == nil else {
         return error(
@@ -207,7 +287,18 @@ public actor InferenceService {
           status: .unauthorized, closing: context.channel)
       }
       let path = request.uri.path
-      if !(request.method == .post && (path == "/mox/v1/generations" || path == "/mox/v1/downloads" || path == "/mox/v1/downloads/plan" || path == "/mox/v1/registries" || path == "/mox/v1/config/default" || path == "/mox/v1/models/import" || path == "/mox/v1/public-api")),
+      let modelSettingsBody =
+        request.method == .post && path.hasPrefix("/mox/v1/models/")
+        && (path.hasSuffix("/sampling") || path.hasSuffix("/pin"))
+      let acceptsBody =
+        request.method == .post
+        && ([
+          "/mox/v1/generations", "/mox/v1/downloads", "/mox/v1/downloads/plan",
+          "/mox/v1/registries", "/mox/v1/config/default", "/mox/v1/config/sampling",
+          "/mox/v1/config/effective", "/mox/v1/models/import", "/mox/v1/public-api",
+        ]
+        .contains(path) || modelSettingsBody)
+      if !acceptsBody,
         request.headers[.transferEncoding] != nil
           || (request.headers[.contentLength].flatMap(Int.init) ?? 0) > 0
       {
@@ -216,9 +307,14 @@ public actor InferenceService {
           status: .badRequest, closing: context.channel)
       }
       if request.method == .get, path == "/mox/v1/identity" { return try json(identity) }
-      if request.method == .get, path == "/mox/v1/state" { return try json(await snapshot()) }
+      if request.method == .get, path == "/mox/v1/state" { return try json(try await snapshot()) }
+      if request.method == .get, path == "/mox/v1/diagnostics" {
+        return try json(await diagnosticEvents())
+      }
       if request.method == .get, path == "/mox/v1/public-api" {
-        guard let publicAPI else { throw MoxError(.shuttingDown, "Public API control is unavailable.") }
+        guard let publicAPI else {
+          throw MoxError(.shuttingDown, "Public API control is unavailable.")
+        }
         return try json(await publicAPI.status())
       }
       if request.method == .get, path == "/mox/v1/public-api/key" {
@@ -228,111 +324,69 @@ public actor InferenceService {
         return try json(key)
       }
       if request.method == .post, path == "/mox/v1/public-api/rotate" {
-        guard let publicAPI else { throw MoxError(.shuttingDown, "Public API control is unavailable.") }
+        guard let publicAPI else {
+          throw MoxError(.shuttingDown, "Public API control is unavailable.")
+        }
         return try json(try await publicAPI.rotateKey())
       }
       if request.method == .post, path == "/mox/v1/public-api" {
-        guard let publicAPI else { throw MoxError(.shuttingDown, "Public API control is unavailable.") }
-        var data = Data()
-        for try await buffer in request.body {
-          guard buffer.readableBytes <= 1024 - data.count else {
-            throw MoxError(.bodyTooLarge, "Public API setting exceeds 1 KiB.")
-          }
-          data.append(contentsOf: buffer.readableBytesView)
+        guard let publicAPI else {
+          throw MoxError(.shuttingDown, "Public API control is unavailable.")
         }
+        let data = try await RequestBodyReader.read(
+          request, channel: context.channel,
+          limit: 1024, description: "Public API setting exceeds 1 KiB.")
+        bodyConsumed = true
         let body = try Wire.decode(PublicAPIChange.self, data)
         return try json(try await publicAPI.setEnabled(body.enabled))
       }
       if request.method == .post, path == "/mox/v1/config/default" {
-        guard let downloads else { throw MoxError(.shuttingDown, "Source settings are unavailable.") }
-        var data = Data()
-        for try await buffer in request.body {
-          guard buffer.readableBytes <= 4096 - data.count else {
-            throw MoxError(.bodyTooLarge, "Source settings exceed 4 KiB.")
-          }
-          data.append(contentsOf: buffer.readableBytesView)
+        guard let downloads else {
+          throw MoxError(.shuttingDown, "Source settings are unavailable.")
         }
+        let data = try await RequestBodyReader.read(
+          request, channel: context.channel,
+          limit: 4096, description: "Source settings exceed 4 KiB.")
+        bodyConsumed = true
         let body = try Wire.decode(DefaultRegistryUpdate.self, data)
-        return try json(try await downloads.setDefaultRegistry(
-          body.registryID, expectedRevision: body.expectedRevision))
+        return try json(
+          try await downloads.setDefaultRegistry(
+            body.registryID, expectedRevision: body.expectedRevision))
+      }
+      if request.method == .post, path == "/mox/v1/config/sampling" {
+        guard let downloads else { throw MoxError(.shuttingDown, "Settings are unavailable.") }
+        let data = try await RequestBodyReader.read(
+          request, channel: context.channel,
+          limit: 4096, description: "Sampling settings exceed 4 KiB.")
+        bodyConsumed = true
+        let body = try Wire.decode(GlobalSamplingUpdate.self, data)
+        return try json(
+          try await downloads.setGlobalSampling(
+            body.settings,
+            expectedRevision: body.expectedRevision))
+      }
+      if request.method == .post, path == "/mox/v1/config/effective" {
+        let data = try await RequestBodyReader.read(
+          request, channel: context.channel,
+          limit: 4096, description: "Sampling request exceeds 4 KiB.")
+        bodyConsumed = true
+        let body = try Wire.decode(SamplingResolutionBody.self, data)
+        return try json(try await resolveSampling(model: body.model, explicit: body.explicit))
       }
       if request.method == .post, path == "/mox/v1/registries" {
-        guard let downloads, let sources else { throw MoxError(.shuttingDown, "Source settings are unavailable.") }
-        if let length = request.headers[.contentLength].flatMap(Int.init), length > 16_384 {
-          throw MoxError(.bodyTooLarge, "Source settings exceed 16 KiB.")
+        guard downloads != nil else {
+          throw MoxError(.shuttingDown, "Source settings are unavailable.")
         }
-        var data = Data()
-        for try await buffer in request.body {
-          guard buffer.readableBytes <= 16_384 - data.count else {
-            throw MoxError(.bodyTooLarge, "Source settings exceed 16 KiB.")
-          }
-          data.append(contentsOf: buffer.readableBytesView)
-        }
+        let data = try await RequestBodyReader.read(
+          request, channel: context.channel,
+          limit: 16_384, description: "Source settings exceed 16 KiB.")
+        bodyConsumed = true
         let body = try Wire.decode(RegistryUpdate.self, data)
-        guard body.expectedRevision == (await downloads.snapshot()).configuration.revision else {
-          throw MoxError(.busy, "Source configuration changed; reload and try again.")
-        }
-        var registry = body.registry
-        // Validate both endpoints even when no credential is provided.
-        _ = try sources.make(provider: registry.provider, endpoint: registry.origin, credentialReference: nil)
-        if let mirror = registry.mirror {
-          _ = try sources.make(provider: registry.provider, endpoint: mirror, credentialReference: nil)
-        }
-        let previous = try? await downloads.registry(registry.id)
-        if let previous {
-          guard previous.origin == registry.origin, previous.provider == registry.provider else {
-            throw MoxError(.busy, "Create a new source for a different origin or protocol.")
-          }
-          registry.credentialReference = previous.credentialReference
-          registry.mirrorCredentialReference = previous.mirror == registry.mirror
-            ? previous.mirrorCredentialReference : nil
-        } else {
-          registry.credentialReference = nil
-          registry.mirrorCredentialReference = nil
-        }
-        var stagedCredentials: [String] = []
-        let updated: ModelConfiguration
-        do {
-          if let credential = body.credential {
-            let reference = try sources.saveCredential(
-              credential, registryID: registry.id, endpoint: registry.origin)
-            stagedCredentials.append(reference)
-            registry.credentialReference = reference
-          }
-          if let credential = body.mirrorCredential, let mirror = registry.mirror {
-            let reference = try sources.saveCredential(
-              credential, registryID: registry.id, endpoint: mirror)
-            stagedCredentials.append(reference)
-            registry.mirrorCredentialReference = reference
-          }
-          updated = try await downloads.updateRegistry(
-            registry, expectedRevision: body.expectedRevision)
-        } catch {
-          var cleanupFailed = false
-          for reference in stagedCredentials {
-            do { try sources.deleteCredential(reference: reference) }
-            catch { cleanupFailed = true }
-          }
-          if cleanupFailed {
-            throw MoxError(.storageFailed, "Unused source credentials could not be removed from Keychain.")
-          }
-          throw error
-        }
-        if let previous {
-          let activeReferences = Set(updated.registries.flatMap {
-            [$0.credentialReference, $0.mirrorCredentialReference].compactMap { $0 }
-          })
-          for reference in [previous.credentialReference, previous.mirrorCredentialReference].compactMap({ $0 })
-            where !activeReferences.contains(reference)
-          {
-            do { try sources.deleteCredential(reference: reference) }
-            catch {
-              Logger(subsystem: "dev.mox", category: "source")
-                .error("stage=keychain cleanup=failed")
-            }
-          }
-        }
-        return try json(updated)
+        return try json(
+          try await library.updateRegistry(
+            body.registry,
+            expectedRevision: body.expectedRevision, credential: body.credential,
+            mirrorCredential: body.mirrorCredential))
       }
       if request.method == .get, path == "/mox/v1/library" {
         guard let downloads else { throw MoxError(.shuttingDown, "Model library is unavailable.") }
@@ -344,91 +398,88 @@ public actor InferenceService {
           }
           return number
         }
-        return try json(ModelLibraryPage(await downloads.snapshot(),
-          installationOffset: offset("installOffset"), operationOffset: offset("operationOffset")))
+        return try json(
+          try await downloads.page(
+            installationOffset: offset("installOffset"), operationOffset: offset("operationOffset"))
+        )
       }
       if request.method == .post, path == "/mox/v1/models/import" {
         guard let downloads else { throw MoxError(.shuttingDown, "Model library is unavailable.") }
-        var data = Data()
-        for try await buffer in request.body {
-          guard buffer.readableBytes <= 16_384 - data.count else {
-            throw MoxError(.bodyTooLarge, "Import request exceeds 16 KiB.")
-          }
-          data.append(contentsOf: buffer.readableBytesView)
-        }
+        let data = try await RequestBodyReader.read(
+          request, channel: context.channel,
+          limit: 16_384, description: "Import request exceeds 16 KiB.")
+        bodyConsumed = true
         let body = try Wire.decode(ModelImportBody.self, data)
-        return try json(ModelInstallationSummary(try await downloads.importDirectory(path: body.path, alias: body.alias)))
+        return try json(
+          ModelInstallationSummary(
+            try await downloads.importDirectory(path: body.path, alias: body.alias)))
       }
       let modelParts = path.split(separator: "/")
       if modelParts.count >= 4, modelParts.prefix(3).joined(separator: "/") == "mox/v1/models",
         let id = UUID(uuidString: String(modelParts[3])), let downloads
       {
         let item = try await downloads.installation(id)
-        if request.method == .get, modelParts.count == 4 { return try json(ModelInstallationSummary(item)) }
+        if request.method == .get, modelParts.count == 4 {
+          return try json(ModelInstallationSummary(item))
+        }
         if request.method == .post, modelParts.count == 5 {
-          let normalized = URL(fileURLWithPath: item.path).standardizedFileURL.resolvingSymlinksInPath().path
-          guard !removingPaths.contains(normalized) else {
-            throw MoxError(.busy, "Model removal is in progress.")
+          if modelParts[4] == "sampling" || modelParts[4] == "pin" {
+            let data = try await RequestBodyReader.read(
+              request, channel: context.channel,
+              limit: 4096, description: "Model settings exceed 4 KiB.")
+            bodyConsumed = true
+            if modelParts[4] == "sampling" {
+              let body = try Wire.decode(ModelSamplingUpdate.self, data)
+              return try json(
+                ModelInstallationSummary(
+                  try await downloads.setModelSampling(
+                    id,
+                    settings: body.settings, expectedRevision: body.expectedRevision)))
+            }
+            let body = try Wire.decode(ModelPinUpdate.self, data)
+            return try json(
+              ModelInstallationSummary(
+                try await library.setPinned(
+                  id,
+                  pinned: body.pinned, expectedRevision: body.expectedRevision)))
           }
           switch modelParts[4] {
           case "select":
-            return try json(ModelLibraryPage(try await downloads.selectInstallation(id)))
-          case "load":
-            if let installation = await downloads.snapshot().installations.first(where: { $0.path == normalized }),
-              installation.availability != .ready || installation.deletionPending
-            {
-              throw MoxError(.invalidModel, "Managed model is unavailable; inspect or remove the installation.")
-            }
-            submittingPaths.insert(normalized)
-            defer { submittingPaths.remove(normalized) }
-            try await runtime.load(model: LocalModel(path: normalized))
-          case "unload":
-            guard !submittingPaths.contains(normalized) else {
-              throw MoxError(.busy, "Model request is starting.")
-            }
-            removingPaths.insert(normalized)
-            defer { removingPaths.remove(normalized) }
-            try await runtime.unload(modelID: LocalModelIdentity.identifier(for: URL(fileURLWithPath: normalized)))
+            try await downloads.selectInstallation(id)
+            return try json(try await downloads.page())
+          case "load": try await library.load(id)
+          case "unload": try await library.unload(id)
           default: throw MoxError(.notFound, "Unknown model action.")
           }
-          return try json(await snapshot())
+          return try json(try await snapshot())
         }
       }
       if request.method == .delete, path.hasPrefix("/mox/v1/models/") {
-        guard let downloads, let id = UUID(uuidString: String(path.dropFirst("/mox/v1/models/".count))) else {
+        guard let downloads,
+          let id = UUID(uuidString: String(path.dropFirst("/mox/v1/models/".count)))
+        else {
           throw MoxError(.notFound, "Model installation was not found.")
         }
-        let item = try await downloads.installation(id)
-        let normalized = URL(fileURLWithPath: item.path).standardizedFileURL.resolvingSymlinksInPath().path
-        guard !removingPaths.contains(normalized), !submittingPaths.contains(normalized) else {
-          throw MoxError(.busy, "Model has a request starting or removal in progress.")
-        }
-        removingPaths.insert(normalized)
-        defer { removingPaths.remove(normalized) }
-        try await runtime.unload(modelID: LocalModelIdentity.identifier(for: URL(fileURLWithPath: normalized)))
-        try await downloads.removeInstallation(id)
-        return try json(ModelLibraryPage(await downloads.snapshot()))
+        try await library.removeInstallation(id)
+        return try json(try await downloads.page())
       }
       if request.method == .post, path == "/mox/v1/downloads" || path == "/mox/v1/downloads/plan" {
-        guard let downloads, let sources else { throw MoxError(.shuttingDown, "Model downloads are unavailable.") }
-        if let length = request.headers[.contentLength].flatMap(Int.init), length > 16_384 {
-          throw MoxError(.bodyTooLarge, "Download request exceeds 16 KiB.")
+        guard downloads != nil else {
+          throw MoxError(.shuttingDown, "Model downloads are unavailable.")
         }
-        var data = Data()
-        for try await buffer in request.body {
-          guard buffer.readableBytes <= 16_384 - data.count else {
-            throw MoxError(.bodyTooLarge, "Download request exceeds 16 KiB.")
-          }
-          data.append(contentsOf: buffer.readableBytesView)
-        }
+        let data = try await RequestBodyReader.read(
+          request, channel: context.channel,
+          limit: 16_384, description: "Download request exceeds 16 KiB.")
+        bodyConsumed = true
         let body = try Wire.decode(PullBody.self, data)
-        let (source, manifest, endpoint) = try await resolvePull(body, downloads: downloads, sources: sources)
+        let reference = ModelPullRequest(
+          registryID: body.registryID, provider: body.provider,
+          endpoint: body.endpoint, repository: body.repository, selector: body.selector,
+          variant: body.variant)
         if path == "/mox/v1/downloads/plan" {
-          return try json(ModelDownloadPlanSummary(try await downloads.plan(manifest)))
+          return try json(ModelDownloadPlanSummary(try await library.planDownload(reference)))
         }
-        let id = try await downloads.create(
-          provider: body.provider, endpoint: endpoint, manifest: manifest)
-        try await downloads.resume(id, source: source)
+        let id = try await library.startDownload(reference)
         return try json(DownloadCreated(id: id), status: .accepted)
       }
       let downloadParts = path.split(separator: "/")
@@ -436,54 +487,36 @@ public actor InferenceService {
         downloadParts.prefix(3).joined(separator: "/") == "mox/v1/downloads",
         let id = UUID(uuidString: String(downloadParts[3])), let downloads
       {
-        guard let item = await downloads.snapshot().operations.first(where: { $0.id == id }) else {
-          throw MoxError(.notFound, "Download operation was not found.")
-        }
+        let item = try await downloads.operation(id)
         return try json(DownloadOperationSummary(item))
       }
       if request.method == .post, downloadParts.count == 5,
         downloadParts.prefix(3).joined(separator: "/") == "mox/v1/downloads",
-        let id = UUID(uuidString: String(downloadParts[3])), let downloads, let sources
+        let id = UUID(uuidString: String(downloadParts[3])), let downloads
       {
         switch downloadParts[4] {
         case "pause": try await downloads.pause(id)
         case "cancel": try await downloads.cancel(id)
         case "discard": try await downloads.discard(id)
         case "resume":
-          guard let operation = await downloads.snapshot().operations.first(where: { $0.id == id }) else {
-            throw MoxError(.notFound, "Download operation was not found.")
-          }
-          let registry = try await downloads.registry(operation.manifest.origin.registryID)
-          let reference = try registry.credentialReference(for: operation.endpoint)
-          let source = try sources.make(
-            provider: operation.provider, endpoint: operation.endpoint, credentialReference: reference)
-          try await downloads.resume(id, source: source)
+          try await library.resumeDownload(id)
         default: throw MoxError(.notFound, "Unknown download action.")
         }
-        return try json(ModelLibraryPage(await downloads.snapshot()))
+        return try json(try await downloads.page())
       }
       if request.method == .post, path == "/mox/v1/generations" {
-        if let length = request.headers[.contentLength].flatMap(Int.init), length > Wire.bodyLimit {
-          return error(
-            MoxError(.bodyTooLarge, "Request exceeds 16 MiB."), status: .contentTooLarge,
-            closing: context.channel)
-        }
-        var data = Data()
-        for try await buffer in request.body {
-          guard buffer.readableBytes <= Wire.bodyLimit - data.count else {
-            return error(
-              MoxError(.bodyTooLarge, "Request exceeds 16 MiB."), status: .contentTooLarge,
-              closing: context.channel)
-          }
-          data.append(contentsOf: buffer.readableBytesView)
-        }
+        let data = try await RequestBodyReader.read(
+          request, channel: context.channel,
+          limit: Wire.bodyLimit, description: "Request exceeds 16 MiB.")
+        bodyConsumed = true
         let body: GenerateBody
         do { body = try GenerateBody.decode(data) } catch let e as MoxError { throw e } catch {
           throw MoxError(.invalidParameters, "Invalid generation JSON.")
         }
-        let handle = try await begin(body)
+        let handle = GenerationHandle(requestID: body.requestID)
         let channel = context.channel
         channel.closeFuture.whenComplete { _ in handle.cancel() }
+        _ = try await begin(body, output: handle)
         let instanceID = identity.instanceID
         return Response(
           status: .ok,
@@ -555,9 +588,14 @@ public actor InferenceService {
         }
       }
       throw MoxError(.notFound, "Private endpoint not found.")
-    } catch let e as MoxError { return error(e) } catch {
+    } catch let e as MoxError {
+      recordFailure(e, path: request.uri.path)
+      return error(e, closing: bodyConsumed ? nil : context.channel)
+    } catch {
+      recordFailure(error, path: request.uri.path)
       return self.error(
-        MoxError(.generationFailed, "Service operation failed; inspect diagnostics."))
+        MoxError(.generationFailed, "Service operation failed; inspect diagnostics."),
+        closing: bodyConsumed ? nil : context.channel)
     }
   }
   private func json<T: Encodable>(_ value: T, status: HTTPResponse.Status = .ok) throws -> Response
@@ -572,20 +610,7 @@ public actor InferenceService {
   private func error(
     _ value: MoxError, status: HTTPResponse.Status? = nil, closing channel: (any Channel)? = nil
   ) -> Response {
-    let code: HTTPResponse.Status =
-      status
-      ?? {
-        switch value.code {
-        case .authenticationFailed: .unauthorized
-        case .notFound: .notFound
-        case .busy, .serviceConflict: .conflict
-        case .bodyTooLarge: .contentTooLarge
-        case .queueFull, .queueTimeout: .tooManyRequests
-        case .resourceLimit, .shuttingDown: .serviceUnavailable
-        case .loadFailed, .generationFailed: .internalServerError
-        default: .badRequest
-        }
-      }()
+    let code = status ?? HTTPFailureStatus.status(value)
     var response =
       (try? json(ErrorEnvelope(instanceID: identity.instanceID, error: value), status: code))
       ?? Response(status: .internalServerError)
@@ -593,30 +618,9 @@ public actor InferenceService {
       response.headers[.connection] = "close"
       let bytes =
         (try? Wire.encode(ErrorEnvelope(instanceID: identity.instanceID, error: value))) ?? Data()
-      response.body = ResponseBody { writer in
-        try await writer.write(ByteBuffer(bytes: bytes))
-        try await writer.finish(nil)
-        // Explicit close prevents Hummingbird's keepalive loop draining an unlimited body.
-        channel.close(mode: .all, promise: nil)
-      }
+      response.body = RequestBodyReader.rejectedBody(bytes, closing: channel)
     }
     return response
-  }
-}
-
-/// Capability evidence is tied to a pinned artifact, not an architecture name.
-enum VerifiedToolModel {
-  static func supports(_ item: ModelInstallation) -> Bool {
-    guard let manifest = item.manifest,
-      manifest.origin.repository == "mlx-community/Qwen3-0.6B-4bit",
-      manifest.origin.revision == "73e3e38d981303bc594367cd910ea6eb48349da8",
-      manifest.origin.variant.isEmpty,
-      manifest.files.contains(where: { $0.path == "model.safetensors" &&
-        $0.digest == .sha256("392e8d466d56100ada00eb82031fb854297fc9e389b7d303eba3af114e87bce2") }),
-      manifest.files.contains(where: { $0.path == "tokenizer.json" &&
-        $0.digest == .sha256("aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4") })
-    else { return false }
-    return true
   }
 }
 
@@ -684,6 +688,8 @@ public struct PrivateServer: Sendable {
     router.delete("/**") { request, context in await service.response(request, context: context) }
     let app = Application(
       router: router,
+      server: .http1(
+        configuration: .init(idleTimeout: .seconds(RequestBodyReader.idleTimeoutSeconds))),
       configuration: .init(
         address: .hostname("127.0.0.1", port: 0), serverName: "Mox",
         availableConnectionsDelegate: MaximumAvailableConnections(ServiceCapacity.connections)),

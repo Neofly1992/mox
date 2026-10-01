@@ -1,8 +1,9 @@
+import CryptoKit
+import Darwin
 import Foundation
 import MoxBootstrap
 import MoxChat
 import MoxClient
-import MoxCore
 import MoxDomain
 import MoxPersistence
 import MoxProtocol
@@ -10,6 +11,8 @@ import MoxServer
 import Security
 import SwiftData
 import Testing
+
+@testable import MoxCore
 
 func temporaryRoot() throws -> URL {
   let url = FileManager.default.temporaryDirectory.appendingPathComponent("Mox M2 测试 \(UUID())")
@@ -33,21 +36,44 @@ func serviceModel() throws -> LocalModel {
   try weights.write(to: root.appendingPathComponent("model.safetensors"))
   return try LocalModel(path: root.path)
 }
+func committedServiceInstallation(
+  model: LocalModel, origin: ArtifactOrigin, artifacts: ArtifactStore
+) throws -> ModelInstallation {
+  let operation = UUID()
+  let staging = try artifacts.stagingDirectory(for: operation)
+  let files = try FileManager.default.contentsOfDirectory(
+    at: model.directory, includingPropertiesForKeys: nil
+  ).map { url in
+    let data = try Data(contentsOf: url)
+    try FileManager.default.copyItem(
+      at: url, to: staging.appendingPathComponent(url.lastPathComponent))
+    return ArtifactFile(
+      path: url.lastPathComponent, bytes: Int64(data.count),
+      digest: .sha256(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()))
+  }
+  let manifest = ArtifactManifest(origin: origin, files: files)
+  let directory = try artifacts.commit(operationID: operation, manifest: manifest)
+  return ModelInstallation(path: directory.path, manifest: manifest, alias: origin.preferredAlias)
+}
+
 struct ServiceBackend: RuntimeBackend {
   var count = 50
   var delay: Duration = .milliseconds(2)
   var text = "你e\u{301}👨‍👩‍👧‍👦\n"
+  var onGenerate: (@Sendable (UUID) async -> Void)? = nil
   func load(_ model: LocalModel) async throws -> any LoadedModel {
     try await Task.sleep(for: .milliseconds(100))
-    return Loaded(count: count, delay: delay, text: text)
+    return Loaded(count: count, delay: delay, text: text, onGenerate: onGenerate)
   }
   struct Loaded: LoadedModel {
     let count: Int
     let delay: Duration
     let text: String
+    let onGenerate: (@Sendable (UUID) async -> Void)?
     func generate(_ request: GenerationRequest, output: GenerationHandle) async throws
       -> BackendResult
     {
+      await onGenerate?(request.id)
       for _ in 0..<count {
         if output.isCancelled { break }
         if !output.emit(.contentDelta(text)) { break }
@@ -62,14 +88,22 @@ struct ServiceBackend: RuntimeBackend {
 func withService(
   backend: ServiceBackend = ServiceBackend(), rootIdentity: String = "fixture",
   downloads: DownloadManager? = nil, sources: (any ModelSourceFactory)? = nil,
+  launchSampling: SamplingSettings = .init(),
   _ body: (ServiceClient, RuntimeCoordinator) async throws -> Void
 ) async throws {
   let identity = ServiceIdentity(
     pid: getpid(), uid: getuid(), rootIdentity: rootIdentity, ownership: .foreground)
   let token = try ServiceFiles.token()
   let runtime = RuntimeCoordinator(backend: backend, policy: .init(budgetBytes: 512 * 1024 * 1024))
-  let service = InferenceService(identity: identity, token: token, runtime: runtime,
-    downloads: downloads, sources: sources)
+  let service = InferenceService(
+    identity: identity, token: token, runtime: runtime,
+    downloads: downloads, sources: sources, launchSampling: launchSampling)
+  if let downloads {
+    await service.attachPublicAPI(
+      PublicAPIManager(
+        service: service,
+        downloads: downloads, rootIdentity: rootIdentity))
+  }
   let ready = AsyncStream<Int>.makeStream(bufferingPolicy: .bufferingNewest(1))
   let server = Task {
     try await PrivateServer(service: service).run { ready.continuation.yield($0) }
@@ -90,6 +124,132 @@ func withService(
   _ = try? await server.value
   #expect(await runtime.snapshot().reservedBytes == 0)
 }
+@Test func samplingSettingsResolveAndSurviveReopen() async throws {
+  let root = try temporaryRoot()
+  let model = try serviceModel()
+  defer {
+    try? FileManager.default.removeItem(at: root)
+    try? FileManager.default.removeItem(at: model.directory)
+  }
+  let store = try await RuntimeStore.open(root: root)
+  let manager = DownloadManager(
+    persistence: store,
+    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")))
+  try await withService(
+    downloads: manager,
+    launchSampling: .init(maxTokens: 700, temperature: 0.3)
+  ) { client, _ in
+    let item = try await client.importModel(path: model.directory.path, alias: "sample-test")
+    let initial = try await client.library().configuration.revision
+    _ = try await client.setGlobalSampling(
+      .init(
+        expectedRevision: initial,
+        settings: .init(maxTokens: 900, topP: 0.8)))
+    await #expect(throws: MoxError.self) {
+      _ = try await client.setGlobalSampling(
+        .init(
+          expectedRevision: initial,
+          settings: .init(maxTokens: 1000)))
+    }
+    let globalRevision = try await client.library().configuration.revision
+    _ = try await client.setModelSampling(
+      item.id,
+      .init(
+        expectedRevision: globalRevision,
+        settings: .init(maxTokens: 500)))
+    let modelRevision = try await client.library().configuration.revision
+    let pinned = try await client.setModelPinned(
+      item.id,
+      .init(expectedRevision: modelRevision, pinned: true))
+    #expect(pinned.pinned)
+    let effective = try await client.resolveSampling(
+      .init(
+        model: .init(kind: "installedAlias", path: "sample-test"),
+        explicit: .init(temperature: 0)))
+    #expect(effective.maxTokens == 500 && effective.maxTokensSource == .model)
+    #expect(effective.temperature == 0 && effective.temperatureSource == .request)
+    #expect(effective.topP == 0.8 && effective.topPSource == .global)
+    let launched = try await client.resolveSampling(
+      .init(
+        model: .init(kind: "localDirectory", path: "/unused")))
+    #expect(launched.maxTokens == 700 && launched.maxTokensSource == .launch)
+  }
+  let reopenedStore = try await RuntimeStore.open(root: root)
+  let reopened = try await reopenedStore.readLibrary()
+  #expect(reopened.configuration.globalSampling.maxTokens == 900)
+  #expect(reopened.installations.first?.samplingSettings.maxTokens == 500)
+  #expect(reopened.installations.first?.pinned == true)
+}
+@Test func activeDownloadSummaryIncludesOperationsBeyondFirstPage() async throws {
+  let root = try temporaryRoot()
+  defer { try? FileManager.default.removeItem(at: root) }
+  let manifest = ArtifactManifest(
+    origin: .init(
+      registryID: UUID(), repository: "fixture/model",
+      revision: String(repeating: "d", count: 40)),
+    files: [
+      .init(path: "config.json", bytes: 2, digest: .sha256(String(repeating: "e", count: 64)))
+    ])
+  var operations = (0...ModelLibraryPage.pageSize).map { _ in
+    DownloadOperation(
+      provider: .huggingFace,
+      endpoint: URL(string: "https://huggingface.co")!, manifest: manifest)
+  }
+  operations[ModelLibraryPage.pageSize].phase = .downloading
+  let snapshot = ModelLibrarySnapshot(operations: operations)
+  #expect(!ModelLibraryPage(snapshot).operations.contains { $0.phase.isActive })
+  let store = try await RuntimeStore.open(root: root)
+  try await store.saveLibrary(snapshot)
+  let manager = DownloadManager(persistence: store, artifacts: try ArtifactStore(root: root))
+  let service = InferenceService(
+    identity: .init(
+      pid: getpid(), uid: getuid(),
+      rootIdentity: "fixture", ownership: .foreground), token: "fixture",
+    runtime: RuntimeCoordinator(
+      backend: ServiceBackend(),
+      policy: .init(budgetBytes: 512 * 1024 * 1024)), downloads: manager)
+  #expect(try await service.snapshot().activeDownloads == 1)
+}
+@Test func privateBodyLimitsCloseUnfinishedChunkedConnections() async throws {
+  let root = try temporaryRoot()
+  defer { try? FileManager.default.removeItem(at: root) }
+  let store = try await RuntimeStore.open(root: root)
+  let manager = DownloadManager(persistence: store, artifacts: try ArtifactStore(root: root))
+  try await withService(downloads: manager) { client, _ in
+    for (path, bytes) in [
+      ("/mox/v1/models/import", 16_385),
+      ("/mox/v1/public-api", 1_025),
+    ] {
+      try await Task.detached {
+        let peer = try SocketPeer(client: client)
+        let head =
+          "POST \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(client.discovery.token)\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+        let chunk =
+          String(bytes, radix: 16) + "\r\n" + String(repeating: "x", count: bytes) + "\r\n"
+        try peer.send(Data((head + chunk).utf8))
+        let response = try peer.receiveHead()
+        #expect(response.contains(" 413 "))
+        #expect(response.lowercased().contains("connection: close"))
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        var received = 0
+        repeat { received = recv(peer.fd, &buffer, buffer.count, 0) } while received > 0
+        #expect(received == 0)
+      }.value
+    }
+  }
+}
+@Test func managementFailuresReachRedactedDiagnostics() async throws {
+  try await withService { client, _ in
+    await #expect(throws: MoxError.self) {
+      _ = try await client.importModel(
+        path: "/private/example/token-sensitive-model", alias: "fixture")
+    }
+    let events = try await client.diagnosticEvents()
+    #expect(events.contains { $0.stage == "model.import" && $0.code == "shuttingDown" })
+    let exported = String(decoding: try Wire.encode(events), as: UTF8.self)
+    #expect(!exported.contains("token-sensitive-model"))
+  }
+}
 func serviceRequest() throws -> GenerationRequest {
   try GenerationRequest(
     messages: [.init(role: .user, text: "fixture-private-prompt")],
@@ -100,20 +260,25 @@ func serviceRequest() throws -> GenerationRequest {
   let root = try temporaryRoot()
   let identity = UUID().uuidString
   defer {
-    let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: "dev.mox.public-api",
-      kSecAttrAccount as String: "dev.mox.public-api.\(identity)"]
+      kSecAttrAccount as String: "dev.mox.public-api.\(identity)",
+    ]
     SecItemDelete(query as CFDictionary)
     try? FileManager.default.removeItem(at: root)
   }
   let store = try await RuntimeStore.open(root: root)
-  let downloads = DownloadManager(persistence: store,
-    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")),
-    state: try await store.readLibrary())
-  let runtime = RuntimeCoordinator(backend: ServiceBackend(),
+  let downloads = DownloadManager(
+    persistence: store,
+    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")))
+  let runtime = RuntimeCoordinator(
+    backend: ServiceBackend(),
     policy: .init(budgetBytes: 512 * 1024 * 1024))
-  let service = InferenceService(identity: .init(pid: getpid(), uid: getuid(),
-    rootIdentity: identity, ownership: .foreground), token: try ServiceFiles.token(),
+  let service = InferenceService(
+    identity: .init(
+      pid: getpid(), uid: getuid(),
+      rootIdentity: identity, ownership: .foreground), token: try ServiceFiles.token(),
     runtime: runtime, downloads: downloads)
   let manager = PublicAPIManager(service: service, downloads: downloads, rootIdentity: identity)
   await service.attachPublicAPI(manager)
@@ -122,7 +287,7 @@ func serviceRequest() throws -> GenerationRequest {
     let disable = Task { try await manager.setEnabled(false) }
     _ = try await enable.value
     _ = try await disable.value
-    let saved = await downloads.snapshot().configuration.publicAPIEnabled
+    let saved = try await downloads.snapshot().configuration.publicAPIEnabled
     let live = await manager.status()
     #expect(live.enabled == saved)
     #expect(live.enabled == (live.endpoint != nil))
@@ -152,7 +317,8 @@ private final class CredentialProbe: ModelSourceFactory, @unchecked Sendable {
   var lastSelection: (URL, String?)? { lock.withLock { selected } }
   var count: Int { lock.withLock { values.count } }
   private struct ProbeSource: ResolvedModelSource {
-    func resolve(registryID: UUID, repository: String, selector: String, variant: String) async throws
+    func resolve(registryID: UUID, repository: String, selector: String, variant: String)
+      async throws
       -> ArtifactManifest
     {
       throw MoxError(.invalidParameters, "Not used by this test.")
@@ -169,10 +335,15 @@ private final class CredentialProbe: ModelSourceFactory, @unchecked Sendable {
   let store = try await RuntimeStore.open(root: root)
   let first = ModelInstallation(path: "/tmp/first", manifest: nil, alias: "first")
   let second = ModelInstallation(path: "/tmp/second", manifest: nil, alias: "second")
-  let manifest = ArtifactManifest(origin: .init(registryID: UUID(), repository: "owner/model",
-    revision: String(repeating: "a", count: 40)), files: [
-      .init(path: "config.json", bytes: 2, digest: .sha256(String(repeating: "b", count: 64)))])
-  let operation = DownloadOperation(provider: .huggingFace,
+  let manifest = ArtifactManifest(
+    origin: .init(
+      registryID: UUID(), repository: "owner/model",
+      revision: String(repeating: "a", count: 40)),
+    files: [
+      .init(path: "config.json", bytes: 2, digest: .sha256(String(repeating: "b", count: 64)))
+    ])
+  let operation = DownloadOperation(
+    provider: .huggingFace,
     endpoint: URL(string: "https://huggingface.co")!, manifest: manifest)
   let ordered = ModelLibrarySnapshot(installations: [second, first], operations: [operation])
   try await store.saveLibrary(ordered)
@@ -194,23 +365,32 @@ private final class CredentialProbe: ModelSourceFactory, @unchecked Sendable {
   let model = try serviceModel()
   defer { try? FileManager.default.removeItem(at: model.directory) }
   var files = (0..<9_997).map { index in
-    ArtifactFile(path: String(format: "model-%05d.safetensors", index), bytes: 64,
+    ArtifactFile(
+      path: String(format: "model-%05d.safetensors", index), bytes: 64,
       digest: .sha256(String(repeating: "a", count: 64)))
   }
   files += ["config.json", "tokenizer.json", "tokenizer_config.json"].map {
     ArtifactFile(path: $0, bytes: 64, digest: .sha256(String(repeating: "a", count: 64)))
   }
-  let manifest = ArtifactManifest(origin: .init(registryID: UUID(), repository: "owner/model",
-    revision: String(repeating: "b", count: 40)), files: files)
-  var library = ModelLibrarySnapshot(installations: (0..<60).map {
-    ModelInstallation(path: model.directory.path, manifest: nil, alias: "local-\($0)")
-  }, operations: [DownloadOperation(provider: .huggingFace,
-    endpoint: URL(string: "https://huggingface.co")!, manifest: manifest)])
+  let manifest = ArtifactManifest(
+    origin: .init(
+      registryID: UUID(), repository: "owner/model",
+      revision: String(repeating: "b", count: 40)), files: files)
+  var library = ModelLibrarySnapshot(
+    installations: (0..<60).map {
+      ModelInstallation(path: model.directory.path, manifest: nil, alias: "local-\($0)")
+    },
+    operations: [
+      DownloadOperation(
+        provider: .huggingFace,
+        endpoint: URL(string: "https://huggingface.co")!, manifest: manifest)
+    ])
   #expect(try JSONEncoder().encode(library).count > 1_048_576)
   let store = try await RuntimeStore.open(root: root)
   try await store.saveLibrary(library)
-  let downloads = DownloadManager(persistence: store,
-    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")), state: library)
+  let downloads = DownloadManager(
+    persistence: store,
+    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")))
   try await withService(downloads: downloads) { client, _ in
     let first = try await client.library()
     #expect(first.installations.count == ModelLibraryPage.pageSize)
@@ -221,9 +401,10 @@ private final class CredentialProbe: ModelSourceFactory, @unchecked Sendable {
     #expect(second.installations.first?.id != first.installations.first?.id)
     let operation = try await client.download(library.operations[0].id)
     #expect(operation.fileCount == 10_000)
-    let configuration = try await client.setDefaultRegistry(.init(
-      expectedRevision: first.configuration.revision,
-      registryID: first.configuration.defaultRegistryID))
+    let configuration = try await client.setDefaultRegistry(
+      .init(
+        expectedRevision: first.configuration.revision,
+        registryID: first.configuration.defaultRegistryID))
     #expect(configuration.revision == first.configuration.revision + 1)
     let removed = try await client.removeModel(first.installations[0].id)
     #expect(removed.totalInstallations == 59)
@@ -234,26 +415,30 @@ private final class CredentialProbe: ModelSourceFactory, @unchecked Sendable {
   let root = try temporaryRoot()
   defer { try? FileManager.default.removeItem(at: root) }
   let store = try await RuntimeStore.open(root: root)
-  let downloads = DownloadManager(persistence: store,
-    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")),
-    state: try await store.readLibrary())
+  let downloads = DownloadManager(
+    persistence: store,
+    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")))
   let credentials = CredentialProbe()
   try await withService(downloads: downloads, sources: credentials) { client, _ in
     let initial = try await client.library()
     let origin = URL(string: "https://source.example")!
     let mirror = URL(string: "https://mirror.example")!
-    let registry = ModelRegistry(id: UUID(), name: "Private mirror", provider: .modelScope,
+    let registry = ModelRegistry(
+      id: UUID(), name: "Private mirror", provider: .modelScope,
       origin: origin, mirror: mirror)
-    let updated = try await client.updateRegistry(.init(
-      expectedRevision: initial.configuration.revision, registry: registry,
-      credential: "origin-secret", mirrorCredential: "mirror-secret"))
+    let updated = try await client.updateRegistry(
+      .init(
+        expectedRevision: initial.configuration.revision, registry: registry,
+        credential: "origin-secret", mirrorCredential: "mirror-secret"))
     let saved = try #require(updated.registries.first { $0.id == registry.id })
     let originReference = try #require(saved.credentialReference)
     let mirrorReference = try #require(saved.mirrorCredentialReference)
     #expect(originReference != mirrorReference)
     await #expect(throws: MoxError.self) {
-      _ = try await client.planPull(.init(provider: .modelScope, endpoint: mirror,
-        registryID: registry.id, repository: "owner/model", selector: "master", variant: ""))
+      _ = try await client.planPull(
+        .init(
+          provider: .modelScope, endpoint: mirror,
+          registryID: registry.id, repository: "owner/model", selector: "master", variant: ""))
     }
     let selected = try #require(credentials.lastSelection)
     #expect(selected.0 == mirror)
@@ -266,32 +451,40 @@ private final class CredentialProbe: ModelSourceFactory, @unchecked Sendable {
   let root = try temporaryRoot()
   defer { try? FileManager.default.removeItem(at: root) }
   let store = try await RuntimeStore.open(root: root)
-  let downloads = DownloadManager(persistence: store,
-    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")),
-    state: try await store.readLibrary())
+  let downloads = DownloadManager(
+    persistence: store,
+    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")))
   let credentials = CredentialProbe()
   try await withService(downloads: downloads, sources: credentials) { first, _ in
     let second = ServiceClient(discovery: first.discovery)
     let initial = try await first.library()
-    let registry = ModelRegistry(id: UUID(), name: "Custom", provider: .huggingFace,
+    let registry = ModelRegistry(
+      id: UUID(), name: "Custom", provider: .huggingFace,
       origin: URL(string: "https://example.com")!)
-    let committed = try await first.updateRegistry(.init(
-      expectedRevision: initial.configuration.revision, registry: registry,
-      credential: "committed"))
-    let reference = try #require(committed.registries.first(where: { $0.id == registry.id })?.credentialReference)
-    await #expect(throws: MoxError.self) {
-      _ = try await second.updateRegistry(.init(
+    let committed = try await first.updateRegistry(
+      .init(
         expectedRevision: initial.configuration.revision, registry: registry,
-        credential: "stale"))
+        credential: "committed"))
+    let reference = try #require(
+      committed.registries.first(where: { $0.id == registry.id })?.credentialReference)
+    await #expect(throws: MoxError.self) {
+      _ = try await second.updateRegistry(
+        .init(
+          expectedRevision: initial.configuration.revision, registry: registry,
+          credential: "stale"))
     }
     #expect(credentials.value(reference) == "committed")
     #expect(credentials.count == 1)
     let current = try await first.library()
-    #expect(current.configuration.registries.first(where: { $0.id == registry.id })?.credentialReference == reference)
-    let replaced = try await second.updateRegistry(.init(
-      expectedRevision: current.configuration.revision, registry: registry,
-      credential: "replacement"))
-    let newReference = try #require(replaced.registries.first(where: { $0.id == registry.id })?.credentialReference)
+    #expect(
+      current.configuration.registries.first(where: { $0.id == registry.id })?.credentialReference
+        == reference)
+    let replaced = try await second.updateRegistry(
+      .init(
+        expectedRevision: current.configuration.revision, registry: registry,
+        credential: "replacement"))
+    let newReference = try #require(
+      replaced.registries.first(where: { $0.id == registry.id })?.credentialReference)
     #expect(newReference != reference)
     #expect(credentials.value(reference) == nil)
     #expect(credentials.value(newReference) == "replacement")
@@ -304,11 +497,13 @@ private final class CredentialProbe: ModelSourceFactory, @unchecked Sendable {
   let root = try temporaryRoot()
   defer { try? FileManager.default.removeItem(at: root) }
   let store = try await RuntimeStore.open(root: root)
-  let downloads = DownloadManager(persistence: store,
-    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")),
-    state: try await store.readLibrary())
-  try await withService(backend: ServiceBackend(count: 10_000, delay: .milliseconds(2)),
-    downloads: downloads) { client, runtime in
+  let downloads = DownloadManager(
+    persistence: store,
+    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")))
+  try await withService(
+    backend: ServiceBackend(count: 10_000, delay: .milliseconds(2)),
+    downloads: downloads
+  ) { client, runtime in
     let installation = try await client.importModel(path: model.directory.path, alias: "busy-model")
     let request = try serviceRequest()
     let generation = try client.generate(path: model.directory.path, request: request)
@@ -341,17 +536,20 @@ private final class CredentialProbe: ModelSourceFactory, @unchecked Sendable {
   defer { try? FileManager.default.removeItem(at: model.directory) }
   let root = try temporaryRoot()
   defer { try? FileManager.default.removeItem(at: root) }
-  let origin = ArtifactOrigin(registryID: UUID(), repository: "fixture/model",
+  let origin = ArtifactOrigin(
+    registryID: UUID(), repository: "fixture/model",
     revision: String(repeating: "a", count: 40))
-  let installation = ModelInstallation(path: model.directory.path,
-    manifest: ArtifactManifest(origin: origin, files: []), alias: origin.preferredAlias)
+  let artifacts = try ArtifactStore(root: root.appendingPathComponent("models"))
+  let installation = try committedServiceInstallation(
+    model: model, origin: origin, artifacts: artifacts)
   let store = try await RuntimeStore.open(root: root)
-  try await store.saveLibrary(.init(installations: [installation]))
-  let downloads = DownloadManager(persistence: store,
-    artifacts: try ArtifactStore(root: root.appendingPathComponent("models")),
-    state: try await store.readLibrary())
+  try await store.commit(.init(installations: [installation]))
+  let downloads = DownloadManager(persistence: store, artifacts: artifacts)
   try await withService(downloads: downloads) { client, _ in
-    let remote = try client.generate(path: origin.preferredAlias, request: serviceRequest())
+    let remote = try client.generate(
+      model: .init(
+        kind: "installedAlias",
+        path: origin.preferredAlias), request: serviceRequest())
     var terminal = false
     for try await event in remote.events {
       if event.payload.isTerminal { terminal = true }
@@ -594,7 +792,10 @@ private final class SaveFailureSwitch: @unchecked Sendable {
     await #expect(throws: MoxError.self) { _ = try await other.next() }
     consumer.cancel()
     _ = try? await consumer.value
-    try await Task.sleep(for: .milliseconds(300))
+    let stoppedBy = ContinuousClock.now.advanced(by: .seconds(2))
+    while await runtime.snapshot().activeLeases != 0, ContinuousClock.now < stoppedBy {
+      try await Task.sleep(for: .milliseconds(10))
+    }
     #expect(await runtime.snapshot().activeLeases == 0)
   }
 }
@@ -800,4 +1001,53 @@ private final class SaveFailureSwitch: @unchecked Sendable {
     #expect(reason == .stop)
     #expect(!accepted.wasRejected)
   }
+}
+
+@Test func privateEarlyRejectionsCloseUnreadBodies() async throws {
+  let root = try temporaryRoot()
+  defer { try? FileManager.default.removeItem(at: root) }
+  let store = try await RuntimeStore.open(root: root)
+  let manager = DownloadManager(persistence: store, artifacts: try ArtifactStore(root: root))
+  try await withService(downloads: manager, sources: CredentialProbe()) { client, _ in
+    let cases = [
+      ("/mox/v1/downloads", "Content-Length: 16385", " 413 "),
+      ("/mox/v1/models/\(UUID())/sampling", "Transfer-Encoding: chunked", " 404 "),
+      ("/mox/v1/models/\(UUID())/pin", "Transfer-Encoding: chunked", " 404 "),
+      ("/mox/v1/unknown", "Transfer-Encoding: chunked", " 400 "),
+    ]
+    for (path, framing, status) in cases {
+      try await Task.detached {
+        let peer = try SocketPeer(client: client)
+        try peer.send(
+          Data(
+            "POST \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(client.discovery.token)\r\n\(framing)\r\n\r\n"
+              .utf8))
+        let response = try peer.receiveHead()
+        #expect(response.contains(status))
+        #expect(response.lowercased().contains("connection: close"))
+        var bytes = [UInt8](repeating: 0, count: 4096)
+        var count: Int
+        repeat { count = recv(peer.fd, &bytes, bytes.count, 0) } while count > 0
+        #expect(count == 0)
+      }.value
+    }
+  }
+}
+
+@Test func managementWorkDeadlineIncludesSourceResolutionAndModelLoad() throws {
+  let identity = ServiceIdentity(
+    pid: getpid(), uid: getuid(), rootIdentity: "fixture", ownership: .foreground)
+  let client = ServiceClient(
+    discovery: .init(
+      identity: identity, privateEndpoint: "http://127.0.0.1:12345", token: "fixture"))
+  #expect(
+    try client.request("/downloads", method: "POST").timeoutInterval
+      == ServiceTiming.managementWorkTimeout)
+  #expect(
+    try client.request("/downloads/plan", method: "POST").timeoutInterval
+      == ServiceTiming.managementWorkTimeout)
+  #expect(
+    try client.request("/models/\(UUID())/load", method: "POST").timeoutInterval
+      == ServiceTiming.managementWorkTimeout)
+  #expect(try client.request("/state").timeoutInterval == ServiceTiming.requestTimeout)
 }

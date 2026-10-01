@@ -5,15 +5,23 @@ import MoxBootstrap
 import MoxCore
 import MoxDomain
 import MoxMLX
-import MoxProtocol
 import MoxPersistence
-import MoxSources
+import MoxProtocol
 import MoxServer
+import MoxSources
 import OSLog
 
 struct Serve: AsyncParsableCommand {
   @Option var dataRoot: String = ServiceFiles.defaultRoot
   @Option var ownership: String = "foreground"
+  @Option(help: "Temporary default maximum output tokens for this worker.") var defaultMaxTokens:
+    Int?
+  @Option(help: "Temporary default temperature for this worker.") var defaultTemperature: Float?
+  @Option(help: "Temporary default top-p for this worker.") var defaultTopP: Float?
+  @Option(help: "GPU queue capacity (1...64).") var queueCapacity: Int = 8
+  @Option(help: "GPU queue timeout in seconds (1...600).") var queueTimeoutSeconds: Int = 60
+  @Option(help: "Memory budget ceiling in bytes; may only lower the device recommendation.")
+  var budgetBytes: Int?
   @Flag var parentControl = false
   mutating func run() async throws {
     BuildInfo.logStartup(component: "worker")
@@ -24,35 +32,6 @@ struct Serve: AsyncParsableCommand {
     let identity = ServiceIdentity(
       pid: getpid(), uid: getuid(), rootIdentity: files.rootIdentity, ownership: owner)
     let token = try ServiceFiles.token()
-    // Validate packaged resources before Cmlx's generated accessor can throw an NSException.
-    if Bundle.main.bundleURL.pathExtension == "app" {
-      guard
-        let resource = Bundle.main.resourceURL?.appendingPathComponent(
-          "mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"),
-        FileManager.default.isReadableFile(atPath: resource.path)
-      else {
-        Logger(subsystem: "dev.mox", category: "process").error("stage=resources code=loadFailed")
-        throw MoxError(
-          .loadFailed, "Bundled Metal resources are missing. Rebuild or reinstall Mox.app.")
-      }
-    }
-    let budget = try MLXBackend.recommendedBudget()
-    let runtime = RuntimeCoordinator(
-      backend: MLXBackend(memoryLimit: budget), policy: .init(budgetBytes: budget),
-      availableMemory: { SystemMemory.availableBytes() })
-    let libraryStore = try await RuntimeStore.open(root: files.root)
-    let artifacts = try ArtifactStore(root: files.root.appendingPathComponent("models"))
-    let downloads = DownloadManager(
-      persistence: libraryStore, artifacts: artifacts, state: try await libraryStore.readLibrary())
-    try await downloads.recover()
-    let sourceFactory = DefaultModelSources(cacheDirectory: files.root.appendingPathComponent("hub-cache"))
-    let service = InferenceService(
-      identity: identity, token: token, runtime: runtime,
-      downloads: downloads, sources: sourceFactory)
-    let publicAPI = PublicAPIManager(service: service, downloads: downloads,
-      rootIdentity: files.rootIdentity)
-    await service.attachPublicAPI(publicAPI)
-    await publicAPI.restore()
     let stop = AsyncStream<MoxError?>.makeStream(bufferingPolicy: .bufferingNewest(1))
     var signals: [DispatchSourceSignal] = []
     signal(SIGPIPE, SIG_IGN)
@@ -87,6 +66,46 @@ struct Serve: AsyncParsableCommand {
       files.remove(instanceID: identity.instanceID)
       withExtendedLifetime(lock) {}
     }
+    // Validate packaged resources before Cmlx's generated accessor can throw an NSException.
+    if Bundle.main.bundleURL.pathExtension == "app" {
+      guard
+        let resource = Bundle.main.resourceURL?.appendingPathComponent(
+          "mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"),
+        FileManager.default.isReadableFile(atPath: resource.path)
+      else {
+        Logger(subsystem: "dev.mox", category: "process").error("stage=resources code=loadFailed")
+        throw MoxError(
+          .loadFailed, "Bundled Metal resources are missing. Rebuild or reinstall Mox.app.")
+      }
+    }
+    let budget = try MLXBackend.recommendedBudget()
+    guard (1...64).contains(queueCapacity), (1...600).contains(queueTimeoutSeconds),
+      budgetBytes.map({ 64 * 1024 * 1024 <= $0 && $0 <= budget }) ?? true
+    else { throw ValidationError("Invalid queue or memory budget setting.") }
+    let launchSampling = SamplingSettings(
+      maxTokens: defaultMaxTokens,
+      temperature: defaultTemperature, topP: defaultTopP)
+    try launchSampling.validate()
+    let effectiveBudget = budgetBytes ?? budget
+    let runtime = RuntimeCoordinator(
+      backend: MLXBackend(memoryLimit: effectiveBudget),
+      policy: .init(
+        budgetBytes: effectiveBudget, queueCapacity: queueCapacity,
+        queueTimeout: .seconds(queueTimeoutSeconds)),
+      availableMemory: { SystemMemory.availableBytes() })
+    let libraryStore = try await RuntimeStore.open(root: files.root)
+    let artifacts = try ArtifactStore(root: files.root.appendingPathComponent("models"))
+    let downloads = try await DownloadManager.open(
+      persistence: libraryStore, artifacts: artifacts)
+    let sourceFactory = DefaultModelSources(
+      cacheDirectory: files.root.appendingPathComponent("hub-cache"))
+    let service = InferenceService(
+      identity: identity, token: token, runtime: runtime,
+      downloads: downloads, sources: sourceFactory, launchSampling: launchSampling)
+    let publicAPI = PublicAPIManager(
+      service: service, downloads: downloads,
+      rootIdentity: files.rootIdentity)
+    await service.attachPublicAPI(publicAPI)
     let server = PrivateServer(service: service)
     try await withThrowingTaskGroup(of: Void.self) { group in
       group.addTask {
@@ -100,6 +119,8 @@ struct Serve: AsyncParsableCommand {
             diagnostic(
               "Mox ready instance=\(identity.instanceID) endpoint=http://127.0.0.1:\(port) owner=\(owner.rawValue)"
             )
+            try await service.restoreLibrarySettings()
+            await publicAPI.restore()
           } catch {
             Logger(subsystem: "dev.mox", category: "process").error(
               "phase=ready code=serviceConflict")

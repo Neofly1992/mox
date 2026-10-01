@@ -1,10 +1,12 @@
 import AppKit
 import MoxChat
+import MoxDomain
 import MoxPersistence
 import SwiftUI
 
 struct ChatView: View {
   @Bindable var chat: ChatController
+  let chooseModel: () -> Void
   @State private var follow = true
   @State private var showSessions = true
   @State private var displayedAttempts: [UUID: UUID] = [:]
@@ -98,29 +100,7 @@ struct ChatView: View {
                   "开始本地聊天", systemImage: "bubble.left.and.bubble.right",
                   description: Text("选择已有模型目录，输入消息。模型文件保持原样。"))
               }
-              ForEach(replyRows) { row in
-                switch row.content {
-                case .header(let attempt):
-                  replyHeader(attempt)
-                    .padding(18)
-                    .background(
-                      .background.secondary,
-                      in: UnevenRoundedRectangle(topLeadingRadius: 12, topTrailingRadius: 12))
-                case .text(let text, let markdown):
-                  ReplyChunk(text: text, markdown: markdown).equatable()
-                    .accessibilityIdentifier("replyText")
-                    .padding(.horizontal, 18).padding(.vertical, 2)
-                    .background(.background.secondary)
-                case .footer(let attempt):
-                  replyFooter(attempt)
-                    .padding(18)
-                    .background(
-                      .background.secondary,
-                      in: UnevenRoundedRectangle(bottomLeadingRadius: 12, bottomTrailingRadius: 12)
-                    )
-                    .padding(.bottom, 24)
-                }
-              }
+              ForEach(replyRows) { row in replyRow(row) }
               Color.clear.frame(height: 1).id("bottom")
             }.padding(24)
           }
@@ -161,13 +141,27 @@ struct ChatView: View {
           DisclosureGroup("生成参数", isExpanded: $parametersExpanded) {
             HStack {
               Text("最大输出")
-              TextField("tokens", value: $chat.maxTokens, format: .number).frame(width: 65)
+              TextField("tokens", value: Binding(get: { chat.maxTokens }, set: {
+                chat.setMaxTokensOverride($0)
+              }), format: .number).frame(width: 65)
                 .accessibilityIdentifier("maxTokens")
               Text("温度")
-              TextField("温度", value: $chat.temperature, format: .number).frame(width: 65)
+              TextField("温度", value: Binding(get: { chat.temperature }, set: {
+                chat.setTemperatureOverride($0)
+              }), format: .number).frame(width: 65)
                 .accessibilityIdentifier("temperature")
             }.disabled(chat.isWorking || chat.isClosing)
-            Text("仅影响后续请求；超出有效范围由服务明确拒绝。").font(.caption)
+            if let effective = chat.effectiveSampling {
+              Text("最大输出：\(samplingSourceLabel(effective.maxTokensSource)) · 温度：\(samplingSourceLabel(effective.temperatureSource)) · top-p：\(samplingSourceLabel(effective.topPSource))")
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            Button("恢复模型/全局默认") {
+              chat.maxTokensExplicit = false
+              chat.temperatureExplicit = false
+              Task { await chat.refreshEffectiveSampling() }
+            }.disabled(chat.isWorking || chat.isClosing)
+            Text("仅影响后续请求；留空的模型设置由全局或产品默认值决定。")
+              .font(.caption)
           }
           HStack {
             Spacer()
@@ -263,6 +257,26 @@ struct ChatView: View {
     }
     return rows
   }
+  @ViewBuilder private func replyRow(_ row: ReplyRow) -> some View {
+    switch row.content {
+    case .header(let attempt):
+      replyHeader(attempt)
+        .padding(18)
+        .background(.background.secondary,
+          in: UnevenRoundedRectangle(topLeadingRadius: 12, topTrailingRadius: 12))
+    case .text(let text, let markdown):
+      ReplyChunk(text: text, markdown: markdown).equatable()
+        .accessibilityIdentifier("replyText")
+        .padding(.horizontal, 18).padding(.vertical, 2)
+        .background(.background.secondary)
+    case .footer(let attempt):
+      replyFooter(attempt)
+        .padding(18)
+        .background(.background.secondary,
+          in: UnevenRoundedRectangle(bottomLeadingRadius: 12, bottomTrailingRadius: 12))
+        .padding(.bottom, 24)
+    }
+  }
   private func replyHeader(_ attempt: AttemptSnapshot) -> some View {
     VStack(alignment: .leading, spacing: 12) {
       Text("你").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -327,10 +341,6 @@ struct ChatView: View {
     }
     return chat.modelPath.isEmpty ? "只引用本地目录，不下载或改写文件" : "本地引用 · 仅 Qwen2.5 0.5B 已验证，其他模型尚未验证"
   }
-  func chooseModel() {
-    ModelDirectoryPicker.present { chat.modelPath = $0 }
-  }
-
 }
 func phaseLabel(_ phase: String) -> String {
   switch phase {

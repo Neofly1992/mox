@@ -113,38 +113,3 @@ struct StoredSampling: Codable {
     topP = sampling.topP
   }
 }
-public enum ChatMigration: SchemaMigrationPlan {
-  // Legacy requests can contain large duplicated histories; keep each migration fetch small.
-  private static let batchSize = 8
-  public static var schemas: [any VersionedSchema.Type] { [ChatSchemaV1.self, ChatSchemaV2.self] }
-  public static var stages: [MigrationStage] {
-    [
-      .custom(
-        fromVersion: ChatSchemaV1.self, toVersion: ChatSchemaV2.self,
-        willMigrate: { context in
-          // V1 redundantly embedded ancestor messages in each request. Preserve the canonical
-          // message records and branches, retaining only parameters in the renamed column.
-          struct LegacyRequest: Decodable { let sampling: StoredSampling }
-          var query = FetchDescriptor<ChatSchemaV1.Attempt>(sortBy: [SortDescriptor(\.createdAt)])
-          query.fetchLimit = batchSize
-          while true {
-            let batch = try context.fetch(query)
-            if batch.isEmpty { break }
-            for attempt in batch {
-              let decoder = JSONDecoder()
-              // A retried interrupted migration may already have compacted this batch.
-              let parameters: StoredSampling
-              if let legacy = try? decoder.decode(LegacyRequest.self, from: attempt.requestBody) {
-                parameters = legacy.sampling
-              } else {
-                parameters = try decoder.decode(StoredSampling.self, from: attempt.requestBody)
-              }
-              attempt.requestBody = try JSONEncoder().encode(parameters)
-            }
-            try context.save()
-            query.fetchOffset = (query.fetchOffset ?? 0) + batch.count
-          }
-        }, didMigrate: nil)
-    ]
-  }
-}

@@ -131,7 +131,9 @@ func stopDuringPendingSaveNeverSubmitsGeneration(quit: Bool) async throws {
     #expect(await chat.live?.saved == true)
     #expect(await chat.selected?.attempts.first?.errorCode == "invalidModel")
     #expect(await chat.servicePhase == "running")
-    #expect(try await client.state().revision == 0)
+    let rejectedState = try await client.state()
+    #expect(rejectedState.requests.isEmpty)
+    #expect(rejectedState.revision > 0)
     #expect(await runtime.snapshot().activeLeases == 0)
     await MainActor.run {
       chat.modelPath = model.directory.path

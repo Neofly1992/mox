@@ -15,7 +15,9 @@ public final class GenerationHandle: Sendable {
     var cancelled = false
     var cancelAt: ContinuousClock.Instant?
     var stoppedAt: ContinuousClock.Instant?
-    var overflow = false
+    var outputFailure: MoxError?
+    var emittedBytes = 0
+    var toolCalls = 0
     var task: Task<Void, Never>?
   }
   private let lock = NSLock()
@@ -58,16 +60,32 @@ public final class GenerationHandle: Sendable {
     lock.withLock {
       guard !state.terminal, !state.cancelled, !payload.isTerminal else { return false }
       let size = Self.size(payload)
+      var failure: MoxError?
+      if size > StreamLimits.maximumOutputBytes - state.emittedBytes {
+        failure = MoxError(.resourceLimit, "Generation output exceeds 16 MiB.")
+      }
+      if case .toolCall(_, _, let arguments) = payload {
+        if state.toolCalls >= StreamLimits.maximumToolCalls
+          || arguments.utf8.count > StreamLimits.maximumToolArgumentBytes
+        {
+          failure = MoxError(.resourceLimit, "Tool output exceeds its count or argument limit.")
+        }
+      }
       if size > byteLimit
         || (state.waiter == nil
           && (state.events.count >= capacity || state.bytes + size > byteLimit))
       {
+        failure = failure ?? MoxError(.slowConsumer, "Output consumer exceeded the bounded buffer.")
+      }
+      if let failure {
         state.cancelAt = .now
-        state.overflow = true
+        state.outputFailure = failure
         state.cancelled = true
         state.task?.cancel()
         return false
       }
+      state.emittedBytes += size
+      if case .toolCall = payload { state.toolCalls += 1 }
       append(payload, size: size)
       return true
     }
@@ -76,8 +94,8 @@ public final class GenerationHandle: Sendable {
     lock.withLock {
       guard !state.terminal else { return }
       let final: GenerationPayload
-      if state.overflow {
-        final = .failed(MoxError(.slowConsumer, "Output consumer exceeded the bounded buffer."))
+      if let failure = state.outputFailure {
+        final = .failed(failure)
       } else if state.cancelled {
         final = .finished(.cancelled)
       } else {

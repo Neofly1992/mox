@@ -13,7 +13,7 @@
 | GUI | SwiftUI + Observation；必要处使用 AppKit | `@MainActor @Observable` feature state；避免一个巨大 AppState，不为简单视图强制套 MVVM 层级。Apple 官方介绍了 Observation 的依赖跟踪。[文档](https://developer.apple.com/documentation/SwiftUI/Managing-model-data-in-your-app) |
 | 持久化 | SwiftData | 用户已确认；使用明确 store、隔离与保存边界。无 GRDB、无手写 SQLite 访问层。ModelContainer 管理 schema/store，ModelActor 隔离上下文。[ModelContainer](https://developer.apple.com/documentation/swiftdata/modelcontainer)、[ModelActor](https://developer.apple.com/documentation/swiftdata/modelactor) |
 | 推理 | mlx-swift + mlx-swift-lm 官方产品 | 直接复用模型 factory、tokenizer、生成、工具解析和统计；不重写模型架构。 |
-| HF 获取 | 官方 swift-huggingface adapter | 复用精确 revision、快照下载、cache、恢复；Mox 实现业务安装事务。[项目](https://github.com/huggingface/swift-huggingface) |
+| HF 获取 | 官方 swift-huggingface adapter | 复用精确 revision、元数据树分页与鉴权；字节使用原生 URLSession 写入 Mox 暂存区，Core 完成校验和安装事务。[项目](https://github.com/huggingface/swift-huggingface) |
 | 其他源网络 | Foundation URLSession | 原生请求、下载到文件与取消；只补源协议和官方 SDK 未覆盖的恢复要求，不先造并行 Range 引擎。 |
 | HTTP server | Hummingbird 2 系列，底层 SwiftNIO | Hummingbird 提供路由、中间件和服务框架；不直接维护一大块 NIO handler。它是社区项目，不宣称 Apple 官方框架。[项目](https://github.com/hummingbird-project/hummingbird) |
 | GUI/CLI client 与本地 IPC | URLSession + loopback HTTP，管理 listener 独立鉴权 | 同一 client 连接 App worker、前台服务和 Homebrew 服务；业务入口统一在 Core，不能把 transport 数量等同于业务实现数量。 |
@@ -82,12 +82,12 @@ Unix socket 可提供文件权限隔离，但 Foundation URLSession 没有与普
 
 - 对 canonical data root 派生实例键。跨进程 `flock` 的持有文件描述符是所有权依据，PID/端口/文件存在都不是锁。
 - root 下 `run/` 目录权限 0700，discovery 文件 0600；声明 instanceUUID、PID、owner、protocolVersion、private endpoint、public endpoint 状态和随机实例级管理凭据。凭据不写日志，不以 argv 传入。
-- 锁成功后初始化 store/recovery，再绑定 listener，最后原子发布 ready discovery。启动失败不留下可用声明。
+- 锁成功后先建立父进程控制和退出处理，初始化元数据 store、创建拥有恢复任务的 Core 管理器，绑定 listener 并原子发布服务探活 discovery。耗时文件校验在受控后台执行；探活成功不表示所有模型已校验。基础 store/listener 初始化失败不留下可用声明。
 - client 校验文件归属/权限、instanceUUID、协议版本、Mox identity；不接受任意 2xx 服务。管理凭据仅在 loopback 指定 origin 使用，禁止 redirect 携带。
 - 随机凭据防其他用户或浏览器页面轻易访问管理 API；它不构成抵御同一用户恶意进程的安全边界。
 - 竞争启动的失败者只连接已验证实例，不加载第二份模型。`mox serve` 显式启动遇到已占用 root 时返回清晰非零退出，不进入重试风暴。
 - GUI 对自己的 worker 保留父子控制管道。正常退出协调关闭；父进程崩溃/管道 EOF 触发 worker 取消任务、保存状态并退出。Homebrew 模式不依赖 GUI 管道。
-- 管理 listener 随机 loopback 端口；公开推理 listener 默认 127.0.0.1:11555。GUI 自启动可以先只开私有 listener，在用户开启 API 服务后绑定公开端口；`mox serve` 默认开启公开 listener。公开端口占用明确报错，不偷偷改地址。
+- 管理 listener 随机 loopback 端口；公开推理 listener 默认关闭。用户从 App 或 CLI 显式开启后绑定随机 loopback 端口，并在状态中给出实际地址；`mox serve` 也不默认开启公开 listener。
 - 外部客户端 API key 与管理 token 分离，前者可存 Keychain；管理 token 随实例轮换，仅作私有 bootstrap 凭据。外部 endpoint 要求配置 API key，GUI 提供复制连接信息。拒绝浏览器 Origin 请求，默认不开放 CORS。
 
 独立 `.app` 和 Homebrew 安装出现版本差异时明确要求匹配发行版本/协议，不实现旧原型兼容。保留 wire version 是为了检测错误连接，不是维护历史分支。
@@ -114,13 +114,13 @@ InstalledModelID  本地 installation UUID；API/管理动作使用此 ID 或唯
 
 CLI 建议 `hf:org/repo@revision`、`ms:org/repo@revision`、`work:org/repo@revision`；具体字符转义按 provider 校验。短 `org/repo` 使用 defaultRegistry，省略 revision 由 provider 解析默认分支后固定。API model 接受本地唯一 alias 或 installation ID；冲突报错，不猜测。请求时冻结 artifact ID，之后 alias 更新不改变在途请求。
 
-M3 的管理 alias 以 registry/repository/variant 为稳定当前引用，旧安装保留含精确 revision 的 alias。新安装的目录提交与 alias 切换在一份 RuntimeStore 快照中保存；失败不移动当前引用。可显式选择旧版，CLI 的来源参数省略时读取 defaultRegistry。来源凭据更新使用新的 Keychain 引用，配置冲突/保存失败只清理新引用，不覆盖仍在使用的旧凭据。
+M3 的管理 alias 以 registry/repository/variant 为稳定当前引用，旧安装保留含精确 revision 的 alias。新安装的目录提交与 alias 切换在一次 RuntimeStore 身份变更事务中保存；失败不移动当前引用。可显式选择旧版，CLI 的来源参数省略时读取 defaultRegistry。来源凭据更新使用新的 Keychain 引用，配置冲突/保存失败只清理新引用，不覆盖仍在使用的旧凭据。
 
 RegistryConfig：id、displayName、providerKind、origin endpoint、mirror policies、credential reference。Mirror 是同一 registry 的访问替代，不能改变来源身份；用户配置任意端点必须符合支持的 provider 协议。第一版 HF、ModelScope，加自定义同协议实例；OCI/静态 manifest 不在 v1。
 
 `ModelSource` 是 snapshot 级接口：resolve(reference)、describeSnapshot(resolved)、materialize(snapshot, staging, operationContext)。返回相对路径、实际大小/未知标记、校验类型/值、revision、必要资产和能力线索。不能强迫所有 provider 实现相同字节传输方式，否则会失去 HF 官方 SDK 的复用。
 
-HF 使用专属受控 HubCache + 官方 snapshot 下载路径；不删除用户全局 HF cache。初版接受下载 cache 与安装目录短期重复空间，UI 估计峰值，定期清理由本服务拥有的未引用 cache。可用系统文件 clone 优化，但不能依赖 APFS 特性保证正确性。
+HF 使用官方 `swift-huggingface` 元数据、树分页和鉴权能力；下载字节由原生 URLSession 逐文件写入 Mox 自己的暂存区，校验后原子安装。不触碰用户全局 HF cache。UI 预估下载与提交峰值空间；系统文件 clone 只能作为可选优化，不能作为正确性前提。
 
 ModelScope 有官方 Python SDK，并已有独立的轻量 `modelscope-hub`；本次未找到官方维护的 Swift Hub SDK。选择 URLSession 薄适配是原生分发与 SDK 复用的权衡，不是因为没有 SDK。参考当前独立 Hub 实现，而非只盯旧 SDK 的兼容入口；固定参考 revision、建立响应 fixtures 与真实 Hub 集成验证，明确承担远端协议变化的维护成本。若关键语义无法可靠实现，再用证据重新评估内嵌 Python helper；不能要求用户自行安装 Python。[官方 Hub SDK](https://github.com/modelscope/modelscope_hub)
 
@@ -142,10 +142,14 @@ created → resolving → downloading ⇄ paused
 2. source materialize 下载到 staging/cache；取消保存可用恢复信息，删除是独立 discard 操作。
 3. 校验相对路径、资源长度、期望 digest、必要资产、config/weight index 一致性。严格区分服务端内容 digest、Git blob ID 和 opaque ETag；不把本地新算 hash 当作远端完整性证明。
 4. 写可重建的 artifact manifest；标为 prepared。manifest 包含来源、文件目录、digest/provenance、schema version 和变体描述，不含凭据。
-5. 将 staging 原子 rename 到按 artifact ID 命名的最终目录，随后提交 SwiftData 安装记录/alias 更新。
+5. 将 staging 原子 rename 到按 artifact ID 命名的最终目录，随后提交 SwiftData 安装记录/alias 更新。rename 后索引失败，显式继续和启动恢复共用幂等补全：核对完整 manifest、来源身份及实际字节后分别持久化安装索引与任务终态，不重复下载或删除已完成产物；冲突/损坏目标保留并明确失败。
 6. 已安装快照不可原地更新。旧版引用计数和 request lease 归零后才 GC。
 
-数据库保存与 rename 不构成一个事务：崩溃后扫描 prepared manifest 修复“文件已提交、索引未提交”；“索引在、文件缺”标 missing，不能显示 ready。已有快照一律不覆盖。
+数据库保存与 rename 不构成一个事务：崩溃后扫描 prepared manifest 修复“文件已提交、索引未提交”；“索引已提交、任务终态未提交”也必须在启动时补全，覆盖 failed/interrupted/committing，保留安装身份、别名、参数及固定状态并清除任务错误；完整 manifest 冲突不宣布完成。“索引在、文件缺”标 missing，不能显示 ready。已有快照一律不覆盖。
+
+首版 G3 收口：`/state.libraryRecovery` 显示 recovering/ready/failed/stopping、已检查条目数与安全错误码；模型 availability 增加 checking。每次 worker 的校验会话凭证只授权本次进程，旧 ready 值不能跳过校验；凭证是可重建派生值，不是第二业务权威。完整性 IO 不占 Core actor 或变更门闩，最多两个模型同时校验，同模型调用共享任务；后台恢复与目标模型按需校验可并行。GUI/API 可请求 checking 模型：Server 在校验前登记请求与可取消句柄，Core 让句柄拥有准备及后端执行，流式连接在等待中保持心跳。取消和断连立即退出当前请求的校验等待，不取消模型库拥有的共享校验；无调用方仍有库级任务所有者，shutdown 才取消并等待它。取消后不得进入 Runtime，终态须等待该请求实际停止；同步元数据拒绝仍保留 HTTP 错误状态。Core 在完成目标校验前不进入 Runtime；目录引用也不能绕过托管产物的索引与路径校验。服务可探活、查看进度和退出，15 秒只约束 listener 探活，不约束全库校验。恢复期间删除返回 busy，避免与索引修复交叉；校验失败保留记录和文件，诊断可见，停止取消并等待所有自有校验。
+
+首版 G2 收口：UUID 形状 alias 合法，其查询键使用标准 UUID 大写拼写；展示保留输入，非 UUID alias 仍大小写敏感。写入时检查 alias 与安装 UUID 的跨命名空间冲突，生成新安装 ID 也检查现有 alias/ID。解析同时查两种身份，若存在不同记录的歧义则明确 busy，不猜测或改写现有数据。存储的 aliasKey 索引由 payload 按单项重建。
 
 M3 独立审查修正：单个 artifact 缺文件、digest 不符或 manifest 损坏不得阻断整个服务启动；保留可移除的坏安装记录并拒绝加载，健康安装继续可用。启动时必须避免对每个已安装权重做不必要的同步，完整性校验与服务可用性分离并给出安全诊断。模型库传输按配置、摘要分页和文件详情拆分，服务响应与客户端限额一致；持久化按独立身份查询，不能让单条全库 JSON 随任务进度增长。
 
@@ -164,12 +168,12 @@ absent → reserving → loading → warming → ready → unloading → absent
 
 首次加载：先在本 actor 内发布 loading task，再 await；同一 artifact 的请求共享 task。等待者取消只取消自己的等待，不取消其他等待者需要的 load。loader/warmup 失败回滚 reservation，释放资源，向所有等待者返回明确错误。
 
-生成持有 request lease，直到 backend generation task 真正结束且 GPU 工作已完成。lease 按唯一 request ID 释放一次；unload 是可等待的操作。固定表示禁止自动卸载，不阻止用户显式卸载；使用中显式卸载返回 busy，除非用户明确要求先取消任务。
+生成持有 request lease，直到 backend generation task 真正结束且 GPU 工作已完成。lease 按唯一 request ID 释放一次；unload 是可等待的操作。模型安装记录保存 pin 设置，worker 启动时恢复到 Coordinator；Coordinator 只以模型 ID 判断自动淘汰资格。固定表示禁止自动卸载，不阻止用户显式卸载；使用中显式卸载返回 busy，除非用户明确要求先取消任务。
 
 ### 6.1 内存和并发策略
 
 - 初版单 GPU 工作队列：同一时刻一个 load/warmup/generation 高峰任务；可以驻留多个模型。网络下载、HTTP、GUI 保持并发。这是可预测的初始策略，不是 Swift actor 自动串行保证。
-- 初始队列容量 8、等待期限 60s，可配置并在 health 报告；具体数值是待真机校准默认，不宣称最优。排队前验证模型/参数/体量，公平 FIFO；取消立刻移除等待者。
+- 初始队列容量 8、等待期限 60s；`mox serve` 的启动参数可分别调至 1–64 和 1–600 秒，在私有 `/state` 返回实际值。内存预算启动参数只允许压低设备安全建议值，同时传给 MLX backend 和 Coordinator，不可借设置越过自动安全上限。具体数值是待真机校准默认，不宣称最优。排队前验证模型/参数/体量，公平 FIFO；取消立刻移除等待者。
 - 预算区分驻留 weights、KV/工作区、加载峰值、系统 reserve；不能只用磁盘大小，更不能把 GPU cache budget 当 weights budget。
 - 自动预算参考 Metal 设备建议 working set、物理内存、当前压力以及模型 config 估算，取保守可用值；将估算和实测分开显示。估算未知时保守拒绝或要求明确限制，不以一个硬编码 4GB 代表任意模型。
 - 加载前淘汰 idle/unpinned，确认实际释放后再使用额度；处理系统内存压力时优先清理空闲资源。MLX 全局 memory/cache/wired limit 只由 backend 配置，不在各请求争抢设置。
@@ -209,7 +213,7 @@ ResolvedGenerationRequest
 
 多模态从设计上保留 ordered blocks、AssetReference、输入/输出 capability；第一版不实现虚假的 audio/video provider。AssetReference 是服务可解析的资产 ID/元数据，不让外部请求直接指定任意本地文件路径。后续 image 输入通过资源导入边界转为 CIImage，视频用 AVFoundation、音频按上游支持另行接入。媒体下载/解码预算独立，不能把大 base64 塞入 SwiftData 或日志。
 
-参数优先级：显式请求 > 模型设置 > 有效全局设置 > 产品默认。单次解析后冻结；GUI 和 CLI 请求沿相同规则。初始 max output 默认 2048，服务上限建议 8192，但同时受模型 context 和预算限制；这些是产品默认而不是所有模型能力。temperature/topP 等做有限数与范围验证，未知/不支持的语义参数明确拒绝。
+参数优先级逐字段为：显式请求 > 模型设置 > 当前 worker 启动覆盖 > 持久全局设置 > 产品默认。启动覆盖组成有效全局设置但不写入数据库；模型/全局设置以配置 revision 做冲突检测。服务端 Domain `EffectiveSampling.resolve` 是唯一解析规则，私有 preflight 返回值及来源，GUI 在保存待发送请求前冻结此值，CLI 在发送前打印来源；公开 OpenAI/Anthropic 解析器只传显式字段，服务再解析。初始 max output 默认 2048，上限 8192 且仍受模型 context 和预算限制；temperature/topP 做有限数与范围验证，未知/不支持的语义参数明确拒绝。
 
 工具 schema 保留 JSON 结构、调用 ID 和消息角色；工具执行不在 Mox 推理服务内发生。外部 agent 返回 toolResult 后再发下一次生成。`GenerationRequest` 在领域边界校验轮次：有待返回的调用时，后续消息必须立即提供对应结果，不得跨越无关 user/assistant/system 消息；多个 OpenAI `tool` 消息可连续收齐，Anthropic 的多个结果在紧随调用的同一 user 消息中收齐，且可与文本块混排。
 
@@ -229,7 +233,7 @@ failed(code, safeMessage)
 
 M4 实际 `GenerationPayload` 为 `phase`、`promptTokens`、`contentDelta`、完整的 `toolCall(id,name,argumentsJSON)`、`matchedStopSequence`、`usage`、`finished`、`failed`。MLX adapter 使用官方 `ToolCallProcessor`，只在完整解析 JSON 对象后产生工具事件，并保持普通文本与工具调用的生成顺序；OpenAI/Anthropic 编码器从此完整事件切成各自可拼接的流式参数片段。不会对外承诺尚未验证的上游逐 token 工具参数。Qwen3 通过上游模板 `enable_thinking=false` 生成普通文本与工具调用；服务准入仅放行与真机验证的 `mlx-community/Qwen3-0.6B-4bit` 固定 revision、权重 SHA-256 和 tokenizer SHA-256 匹配的受管安装，MLX adapter 另检查架构。未附受管清单的导入引用和其他 Qwen3 变体均需先取得独立能力证据。领域有序块由 adapter 按相邻同类块合并并依序映射为上游 `Chat.Message`，不得将跨工具结果的文字前移。
 
-生成会话 handle 提供事件消费、cancel、waitUntilStopped。采用结构化 task ownership；不暴露一条无错误、无完成信息的 AsyncStream<String>。生产事件不丢，慢消费者超过有界缓冲/写超时明确失败。UI 可合并刷新，不能丢掉持久消息内容。
+生成会话 handle 提供事件消费、cancel、waitUntilStopped。采用结构化 task ownership；不暴露一条无错误、无完成信息的 AsyncStream<String>。生产事件不丢；Core 累计输出上限 16 MiB、最多 32 个工具调用、每次工具参数 64 KiB，超限停止后明确 resourceLimit。等待缓冲和写期限独立，慢消费者明确 slowConsumer。UI 可合并刷新，不能丢掉持久消息内容。
 
 ## 8. HTTP 和 CLI 契约
 
@@ -246,11 +250,13 @@ M4 实际 `GenerationPayload` 为 `phase`、`promptTokens`、`contentDelta`、�
 
 M4 公开协议的具体支持/拒绝字段、wire 事件、错误及测试矩阵以 [M4 规格](../milestones/M4.md)为权威。本层固定跨模块边界：OpenAI/Anthropic DTO 仅在协议适配层；领域为有序文本/工具块和独立媒体边界，Core 是准入、生成、stop、usage、取消与 lease 的唯一业务权威；MLX adapter 在有界输出内接入锁定 SDK 工具模板/解析。私有管理凭据与持久公开 API key 分离，两个 listener 都仅绑定 loopback，公开默认关闭；公开路由不能访问管理用例。GUI/CLI 控制同一服务实例，不复制推理逻辑。模型工具能力经实际验证后才对请求开放，不承诺任意已安装模型均可工具调用。
 
-公共 listener 的请求体读取与连接所有权归 Server：未消费完 body 就拒绝时，错误响应写完立即关闭 channel，不让 HTTP keep-alive 继续等待无限 body；读取有绝对期限，HTTP/1 空闲连接有期限。协议适配只决定错误内容，领域校验不接触 channel 或 HTTP DTO。具体期限与真 socket 证据见 M4 规格及验收报告。
+两个 listener 的请求体读取与连接所有权归 Server：未消费完 body 就拒绝时，错误响应写完立即关闭 channel，不让 HTTP keep-alive 继续等待无限 body；读取有绝对期限，HTTP/1 空闲连接有期限。协议适配只决定错误内容，领域校验不接触 channel 或 HTTP DTO。具体期限与真 socket 证据见 M4 规格及验收报告。
 
 外部 agent 集成验收必须记录该客户端实际使用的协议和端点；不能把 Chat Completions 可用等同于所有客户端（包括需要 Responses API 的配置）可用。新增端点由实际需求决定，不能悄悄降级请求。
 
 错误类与状态：输入/不支持语义 400，认证 401/403，未安装 404，状态冲突 409，body 超限 413，队列满 429，runtime unavailable 503，意外内部错误 500；内存单任务无法容纳使用明确 resource_exhausted code 和稳定映射。SSE headers 发出前做可完成的验证；发出后按对应协议发错误事件并关闭，不再写第二个 HTTP 响应或成功终态。
+
+管理探活 15 秒；来源解析/计划/创建与显式加载客户端期限 15 分钟，取消期限独立，不在超时后自动重放。
 
 所有 body 限制在聚合之前执行，初值 16 MiB 文本请求；SSE 写入 await 完成并最终 flush/end。每条长请求登记 task 并在 disconnect 取消；shutdown/drain 全部可等待。协议序列必须按官方规范和真实 SDK fixtures 验证，此文的领域事件不替代 wire spec。
 
@@ -260,18 +266,24 @@ CLI 产品建议：`pull/list/show/remove/load/unload/chat/serve/status/config/d
 
 两个 store，分别唯一逻辑所有者：
 
-1. RuntimeStore（服务）：RegistryRecord、InstallationRecord、AliasRecord、DownloadOperationRecord、DownloadFileRecord、ModelSettingsRecord、RuntimeSettingsRecord。
-2. ConversationStore（App）：ConversationRecord、MessageRecord、ContentBlockRecord、GenerationAttemptRecord、AttachmentRecord。
+1. RuntimeStore（服务）：配置记录、按 UUID 标识的安装和下载任务记录。Core 提交具体 `LibraryChanges`，配置/安装/任务的关联变更同一次 save；单项动作使用身份谓词，不读取/复制/diff 全库。
+2. ConversationStore（App）：会话、消息、尝试记录；内容块和参数使用存储编码，消息顺序/分支保持现有契约。
 
-属性：显式 UUID、状态枚举编码、created/updated 时间、schemaVersion；工具 arguments 用受控 Codable JSON payload，媒体本体存文件。消息顺序用 sequence，重试创建新的 attempt/分支引用，不覆盖原结果。SwiftData record 不能跨 actor/IPC；业务读取返回 Sendable snapshot。
+运行库的 alias/path/artifact/family/活动阶段和稳定顺序为数据库查询投影，原生索引支持身份/家族查找、活动计数和分页。摘要 payload 与完整业务 payload 在同次事务中生成，摘要页面只查询摘要列；缺失查询投影有界重建，不维护另一份业务权威。传输页 25 项；存储摘要查询最多 100 项，恢复与完整 manifest 扫描逐项读取。没有全库缓存、JSON blob 整库迁移入口或进度更新全库 diff；测试种子/全库断言仅在测试辅助代码中。
+
+完整模型用例由 `ModelLibraryService` 持有：`ModelRuntime` 注入运行资源操作，`ModelSourceFactory` 注入来源/凭据，`DownloadManager` 使用 `ModelLibraryPersistence` 和 ArtifactStore 完成持久事务。生成、显式加载、卸载/删除共享准入；路径起步按计数而非 Set 记录，实际 lease 仍由 Coordinator 管理。来源凭据分阶段创建、提交、回滚/退休，pin 先保护运行状态再持久提交或回滚。Server 仅映射 DTO、鉴权、HTTP 连接与事件消费，直接 Core 调用也经过同一保护。底层危险元数据写入方法不作为公开 Core 用例。
+
+具体治理验收映射与证据见 [2026-09-30 治理报告](../acceptance/source-release-governance-2026-09-30.md)。
 
 各 store 用单独 ModelActor 管理写入；创建地点与执行器验证，不能只写 actor 就认为昂贵工作不会在主线程发生。GUI 的 @Observable state 消费 store snapshots 和 generation events。简单展示可在受控主 actor 使用 SwiftData，但不在 View 中启动下载或 GPU 工作。
 
 autosave 不用于业务完成保证：安装状态、终态、配置等明确 save；流式文本初始每 250ms 或累计 8KiB checkpoint 一次（待性能校准），终态立即保存。崩溃可能丢最后一次 checkpoint 后少量文本，应显示 interrupted；不宣称逐 token 持久化。
 
-使用 VersionedSchema/SchemaMigrationPlan 管理磁盘 schema。M2 当前使用 V2，V1 仅保留为现有聊天数据的迁移输入：保留消息、标识与分支，压缩重复的请求正文为采样参数；新库直接创建 V2。启动 store 失败明确报错，不删除用户对话、不回退空库。备份走应用导出/受控 store 关闭后的完整备份，禁止运行中只复制单个底层 sqlite 文件。
+首个源码版应建立正式初始磁盘 schema；日后发布版本再通过 VersionedSchema/SchemaMigrationPlan 演进。本轮已对本机默认开发期对话库做一致性备份、隔离副本迁移、原库转换及重开核对，随后移除生产 V1 与旧单 blob 运行库入口；见[收口报告](../acceptance/source-release-2026-09-29.md)。未知自定义数据根在使用前须单独识别并保留数据。启动 store 失败明确报错，不回退空库。备份走应用导出/受控 store 关闭后的完整备份，禁止运行中只复制单个底层 sqlite 文件。
 
-配置：SwiftData 中持久设置为权威；启动 flags > MOX_* 环境 > 持久设置 > 默认，形成只读 EffectiveConfig（每字段 provenance）。临时覆盖不回写；`config set` 经管理接口更新。JSON 导入/导出只作显式交换格式，不同时监听第二份配置文件。显示被启动参数覆盖的设置，避免 UI 显示保存成功却不生效。
+启动通过 `DownloadManager.open` 建立管理器并自动拥有后台恢复任务，不能从外部跳过恢复；Core 的 `restoreRuntimeSettings` 恢复固定状态，加载/生成也应用对应安装的持久固定设置。
+
+配置：SwiftData 中持久设置为权威。首版生成设置采用 §7 的逐字段优先级，`serve` 启动 flags 组成临时有效全局；`models sampling` 经管理接口更新持久全局/模型设置。`EffectiveSampling` 返回每字段 provenance，启动覆盖不回写。App 的 `MOX_DATA_ROOT` 只选择数据目录，CLI 使用 `--data-root`；不将路径环境覆盖误称为生成参数配置。JSON 若用于导入/导出，只作显式交换格式，不同时监听第二份配置文件。
 
 路径建议：
 
@@ -289,7 +301,7 @@ autosave 不用于业务完成保证：安装状态、终态、配置等明确 s
 
 ## 10. GUI、分发与诊断
 
-GUI 默认进入模型工作台；M2 一级导航仅模型与测试，会话列表属于测试区域并可收起。摘要与详情分离、替换式有界分页；消息与生成参数使用存储模型自己的编码，HTTP DTO仅位于传输边界。现有聊天经显式schema迁移保留，具体容量与失败诊断以M2规格为准。关闭窗口保留当前模块，重新启动默认模型页。M3/M4 再提供下载/API 页面，不以不可用按钮预建功能。
+GUI 默认进入模型工作台；M2 一级导航仅模型与测试，会话列表属于测试区域并可收起。摘要与详情分离、替换式有界分页；消息与生成参数使用存储模型自己的编码，HTTP DTO仅位于传输边界。正式初始 schema 保存内容块和参数；首版源码仅打开该 schema，具体容量与失败诊断以 M2 规格为准。关闭窗口保留当前模块，重新启动默认模型页。M3/M4 再提供下载/API 页面，不以不可用按钮预建功能。
 
 2026-09-06 用户澄清：0.1 是本机原型验收，App 本地构建仍需完成；下述公开签名、公证、Homebrew 分发要求延后到 P1。Pi 后置；不要求 Codex 或 Responses。
 

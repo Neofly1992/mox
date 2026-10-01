@@ -1,10 +1,25 @@
 import Foundation
+import MoxCore
 import MoxDomain
 @testable import MoxServer
 import Testing
 
 private func body(_ value: [String: Any]) throws -> Data {
   try JSONSerialization.data(withJSONObject: value)
+}
+
+@Test func publicSamplingKeepsOnlyExplicitFields() throws {
+  let base: [String: Any] = ["model": "fixture",
+    "messages": [["role": "user", "content": "hello"]]]
+  let inherited = try PublicProtocol.parse(body(base), dialect: .openAI)
+  #expect(inherited.explicitSampling == SamplingSettings())
+  var specified = base
+  specified["temperature"] = 0
+  specified["top_p"] = 0.7
+  let parsed = try PublicProtocol.parse(body(specified), dialect: .openAI)
+  #expect(parsed.explicitSampling.maxTokens == nil)
+  #expect(parsed.explicitSampling.temperature == 0)
+  #expect(parsed.explicitSampling.topP == 0.7)
 }
 
 @Test func publicProtocolRejectsUnsupportedSemanticsAndPreservesSchema() throws {
@@ -197,4 +212,12 @@ private func body(_ value: [String: Any]) throws -> Data {
     #expect(!error.contains("[DONE]"))
     #expect(!error.contains("message_stop"))
   }
+}
+
+@Test func toolSchemaObjectAndNameValidationRejectsMalformedDefinitions() throws {
+  for schema in ["[]", "{\"type\":\"array\"}", "{}", "invalid"] {
+    #expect(throws: MoxError.self) { try ToolDefinition(name: "fixture", parametersJSON: schema) }
+  }
+  #expect(throws: MoxError.self) { try ToolDefinition(name: "", parametersJSON: "{\"type\":\"object\"}") }
+  #expect(HTTPFailureStatus.status(MoxError(.storageFailed, "fixture")) == .internalServerError)
 }

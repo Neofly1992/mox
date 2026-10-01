@@ -49,3 +49,15 @@
 报告诚实标出了私有镜像、物理断网、真实 MLX 推理中删除、多进程配置联测及 Release GUI 未测，这一点应保留。但可自动完成的真实 lease/双客户端与交付 Release 验证，应由实现会话补齐，不能整体转交用户承担基础正确性排查。真实私有源缺资源则明确列依赖和阻塞；依据 CONTRIBUTING 的出口要求，不能用“可试用候选”替代必需项完成。
 
 先修 R1–R3，补针对性回归和受影响的真实链路，刷新证据后独立复核；用户再验收交互体验。模型库查询/持久化边界需要局部整理，其余已验证的 Core/运行资源/来源适配可以保留，无需整库重写。
+
+
+## 2026-09-25 定向修复复核
+
+对象：本地提交 `64289f6`，复核开始工作区干净。结论：R1–R3 原始缺陷的修复路径已核对；可以开始 M4 规格细化，M3 尚不标记全面验收完成。
+
+- R1：pull/resume 共用 awaitDownload，等待 installed 才成功退出；暂停/失败/中断返回错误。核对了实现者真实 Release pull 与随后 list 的日志，本轮未再次下载模型。外部已有服务下的实际退出/中断行为仍待实测。
+- R2：按 artifact 隔离恢复失败，已有安装会标 corrupt；服务的路径与 alias 准入拒绝不可用安装。独立复跑 missing/digest/manifest 三种破坏夹具通过，健康记录保留且坏安装可移除。启动仍全文 hash 所有权重，大库启动期限问题未验证，不宣称已解决。
+- R3：库查询与单项接口返回摘要，分页最多 25 项；预检不传完整 manifest，SwiftData 分开身份记录。独立复跑超过 1MiB 原始库（60 安装、10,000 文件任务）的 HTTP 列表/详情/配置/删除测试及存储顺序测试通过。
+- 另复跑活动 lease 拒绝删除、过期配置不覆盖已提交凭据测试。合计 5 个测试函数通过（其中一个参数化为 3 个用例）。命令：`swift test --scratch-path .build/m3-fix-tests --filter 'damagedInstallationDoesNotBlockHealthyRecovery|largeLibraryKeepsManagementResponsesBounded|libraryRecordsReopenInInstallationAndOperationOrder|activeGenerationRejectsDeletionUntilLeaseEnds|staleSourceUpdateCannotReplaceCommittedCredential'`；日志 `.build/m3-independent-recheck-20260925.log`。
+
+本轮不包含真实 MLX 删除竞态、Release GUI、外部服务 CLI 生命周期、多进程配置及私有镜像复测。建议 M4 会话先细化规格，并将可自动补齐的 M3 验证作为实施入口收尾；缺私有环境资源如实记录。用户这次询问是否可以继续，不自动等同于完整人工验收通过。

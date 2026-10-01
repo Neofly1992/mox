@@ -803,10 +803,24 @@ private final class SaveFailureSwitch: @unchecked Sendable {
 @Test func unconsumedClientQueueFailsAndReleasesLease() async throws {
   let model = try serviceModel()
   defer { try? FileManager.default.removeItem(at: model.directory) }
-  try await withService(backend: ServiceBackend(count: 10000, delay: .milliseconds(1))) {
+  // Deliberately take longer than one second to fill the client event queue.
+  // Start consuming only after automatic overflow cancellation has stopped work.
+  try await withService(backend: ServiceBackend(count: 10000, delay: .milliseconds(10))) {
     client, runtime in
     let remote = try client.generate(path: model.directory.path, request: serviceRequest())
-    try await Task.sleep(for: .seconds(1))
+    let overflowDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+    var terminal: EventFrame?
+    while terminal == nil, ContinuousClock.now < overflowDeadline {
+      do { terminal = try await client.requestState(remote.requestID).terminal }
+      catch let error as MoxError where error.code == .notFound {
+        // The asynchronous HTTP request may not have reached admission yet.
+      }
+      if terminal == nil { try await Task.sleep(for: .milliseconds(20)) }
+    }
+    let stopped = try #require(terminal, "Unconsumed output must stop without explicit cancellation")
+    if case .finished(.cancelled) = try stopped.event().payload {} else {
+      Issue.record("Overflow must cancel the backend, not finish normally")
+    }
     do {
       for try await _ in remote.events {}
       Issue.record("Unconsumed stream must fail")

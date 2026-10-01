@@ -20,4 +20,4 @@ macOS 15 真机、远端 CI、完整 GUI/模型覆盖、私有来源/镜像及�
 
 ## 下一步
 
-用户按验证记录完成三项体验；本轮独立结果已写入同一记录，与实现者证据分开。2026-10-02 用户授权先合并 main、推送并检查远端 CI，不以人工体验验收作为此次推送前置。已将 `codex/rewrite` 快进合并并推送 `main`（`6f5bf09`）。[首次远端 CI](https://github.com/Neofly1992/mox/actions/runs/36924471268)：repository 通过，native-rules 失败（Xcode exit 65）；错误根因尚未确认，需登录 GitHub 获取完整日志。未将 CI 标记通过；v0.1.0 标签、源码 Release 和远端分支清理不在此次授权内。
+用户按验证记录完成三项体验；本轮独立结果已写入同一记录，与实现者证据分开。2026-10-02 用户授权先合并 main、推送并检查远端 CI，不以人工体验验收作为此次推送前置。已将 `codex/rewrite` 快进合并并推送 `main`（`6f5bf09`）。[首次远端 CI](https://github.com/Neofly1992/mox/actions/runs/36924471268)：repository 通过，native-rules 失败（Xcode exit 65）；登录后已确认唯一失败为 `unconsumedClientQueueFailsAndReleasesLease`：测试固定等待 1 秒便消费输出，在慢 runner 上未形成队列溢出。已改为有界等待服务端自动取消终态，再检查 slowConsumer 与 lease 释放，不改变生产逻辑。本机 Core 52 / Service 65 / Sources 5（2 联网 skipped）通过，远端复跑待确认；v0.1.0 标签、源码 Release 和远端分支清理不在此次授权内。

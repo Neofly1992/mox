@@ -116,3 +116,9 @@ bda2af31e9807cee196d05d02176aa6c107dbd59650a200fb696709ec646fbcb  repository-rec
 用户已授权在体验验收前先合并 main、推送并检查远端 CI，以查看源码效果；不代表人工验收已通过。标签和 GitHub Release 暂不创建。已快进合并并推送 `main`，被测提交 `6f5bf09a399cd2f1c191c6f48d652d72a5a35ee0`。
 
 [首次远端运行](https://github.com/Neofly1992/mox/actions/runs/36924471268)：repository 成功，native-rules 在 `scripts/test.sh rules` 失败，退出码 65。公开注释未提供具体编译/测试错误；日志下载 API 返回 403、浏览器要求登录。当前只有 SSH 推送身份，尚无可用 API/浏览器登录，等待用户提供日志访问。不能将失败归因于环境或宣称已修复。此次结果补记仅修改文档，提交使用 `[skip ci]`，不重复启动相同源码的失败运行；获取原因并修复后必须重新运行。
+
+### 首次 CI 失败定位与定向修复
+
+登录 GitHub 后读取原生日志：Service 65 项中仅 `unconsumedClientQueueFailsAndReleasesLease` 失败（约 61.7 秒），提示 Unconsumed stream must fail；不是编译失败。旧测试固定 sleep 1 秒后开始消费，慢 runner 尚未填满 128 事件队列，随后消费使其失去不消费前提。修复测试在 15 秒有界期限内通过管理接口观察自动取消终态，然后消费并检查 slowConsumer、lease=0；fixture 每事件 10ms，刻意确保填满耗时大于旧的 1 秒。没有增大生产期限、跳过断言或显式取消来伪造通过。
+
+本机修正后 `scripts/test.sh rules`：Core 52、Service 65、Sources 5 执行通过 / 2 联网 skipped；目标测试约 1.785 秒。日志 `.build/ci-overflow-fix-final.log`。首次新增断言误用非 Equatable 枚举的 ==，编译失败后改为模式匹配并完整重跑，不计首次为通过。仓库检查和差异检查通过，生产指纹不变。远端复跑结果待确认。

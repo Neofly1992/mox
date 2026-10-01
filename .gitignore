@@ -10,3 +10,25 @@ xcuserdata/
 
 # Swift/Metal test instrumentation
 *.profraw
+
+# Local tooling, caches, model fixtures and private data
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.xcresult/
+*.safetensors
+*.gguf
+*.sqlite*
+*.store*
+*.profdata
+Mox.xcodeproj/**/Package.resolved
+
+# Built applications, libraries, executables and symbols
+*.app/
+*.dSYM/
+*.o
+*.a
+*.dylib
+*.metallib
+*.bin

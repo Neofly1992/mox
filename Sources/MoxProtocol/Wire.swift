@@ -5,6 +5,7 @@ public enum Wire {
   public static let version = 1
   // Updated by the release build script together for the app and worker.
   public static let buildID = BuildIdentity.value
+  public static let productVersion = BuildIdentity.productVersion
   public static let bodyLimit = 16 * 1024 * 1024
   public static let frameLimit = 1024 * 1024
   public static func encode<T: Encodable>(_ value: T) throws -> Data {

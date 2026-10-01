@@ -37,8 +37,8 @@ import Testing
   #expect(try credentials.read(reference: first) == "first")
 }
 
-@Test func realModelScopeResolvesFixedSnapshotAndVerifiesConfig() async throws {
-  guard ProcessInfo.processInfo.environment["MOX_TEST_REAL_SOURCES"] == "1" else { return }
+@Test(.enabled(if: ProcessInfo.processInfo.environment["MOX_TEST_REAL_SOURCES"] == "1"))
+func realModelScopeResolvesFixedSnapshotAndVerifiesConfig() async throws {
   let source = try ModelScopeSource()
   let manifest = try await source.resolve(registryID: UUID(), repository: "mlx-community/Qwen2.5-0.5B-Instruct-4bit", selector: "master")
   #expect(manifest.origin.revision.count == 40)
@@ -50,8 +50,8 @@ import Testing
   print("MODELSCOPE revision=\(manifest.origin.revision) files=\(manifest.files.count) configBytes=\(config.bytes)")
 }
 
-@Test func realHuggingFaceResolvesFixedSnapshot() async throws {
-  guard ProcessInfo.processInfo.environment["MOX_TEST_REAL_SOURCES"] == "1" else { return }
+@Test(.enabled(if: ProcessInfo.processInfo.environment["MOX_TEST_REAL_SOURCES"] == "1"))
+func realHuggingFaceResolvesFixedSnapshot() async throws {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer { try? FileManager.default.removeItem(at: root) }
   let source = try HuggingFaceSource(cacheDirectory: root)

@@ -1,0 +1,22 @@
+name: Repository checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  repository:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check-repository.py
+  native-rules:
+    # Standard arm64 runner: CPU/SwiftData/HTTP tests, no Metal/MLX or GUI claims.
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/test.sh rules

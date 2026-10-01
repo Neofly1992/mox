@@ -27,7 +27,7 @@ import MoxProtocol
 
   static let configuration = CommandConfiguration(
     commandName: "mox", abstract: "Local MLX text inference",
-    version: "\(Wire.buildID) (\(BuildInfo.configuration))", subcommands: [Chat.self, Serve.self, Models.self, API.self])
+    version: "\(Wire.productVersion) \(Wire.buildID) (\(BuildInfo.configuration))", subcommands: [Chat.self, Serve.self, Models.self, API.self])
 }
 struct Chat: AsyncParsableCommand {
   static let configuration = CommandConfiguration(

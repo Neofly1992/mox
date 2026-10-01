@@ -3,6 +3,7 @@
 from pathlib import Path
 import hashlib
 root = Path(__file__).resolve().parent.parent
+version = (root / 'VERSION').read_text().strip()
 objects = []
 def uid(name): return hashlib.sha256(name.encode()).hexdigest()[:24].upper()
 def obj(name, body):
@@ -30,7 +31,7 @@ def configlist(name, extra):
         optimization = '"-Onone"' if c == 'Debug' else '"-O"'
         ids.append(obj(name+c, f'isa = XCBuildConfiguration; name = {c}; buildSettings = {{ SWIFT_VERSION = 6.0; MACOSX_DEPLOYMENT_TARGET = 15.0; ARCHS = arm64; CODE_SIGN_STYLE = Automatic; CODE_SIGN_IDENTITY = "-"; ENABLE_APP_SANDBOX = NO; SWIFT_OPTIMIZATION_LEVEL = {optimization}; {flags} {extra} }};'))
     return obj(name+'configs',f'isa = XCConfigurationList; buildConfigurations = ({",".join(ids)},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
-appcfg=configlist('app','PRODUCT_NAME = Mox; PRODUCT_BUNDLE_IDENTIFIER = dev.mox.app; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools"; INFOPLIST_KEY_NSPrincipalClass = NSApplication; INFOPLIST_KEY_CFBundleDisplayName = Mox;')
+appcfg=configlist('app',f'MARKETING_VERSION = {version}; CURRENT_PROJECT_VERSION = {version}; PRODUCT_NAME = Mox; PRODUCT_BUNDLE_IDENTIFIER = dev.mox.app; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools"; INFOPLIST_KEY_NSPrincipalClass = NSApplication; INFOPLIST_KEY_CFBundleDisplayName = Mox;')
 testcfg=configlist('test','PRODUCT_NAME = MoxUITests; PRODUCT_BUNDLE_IDENTIFIER = dev.mox.app.uitests; GENERATE_INFOPLIST_FILE = YES; TEST_TARGET_NAME = Mox; CODE_SIGN_ENTITLEMENTS = AppUITests/MoxUITests.entitlements;')
 projcfg=configlist('project','ALWAYS_SEARCH_USER_PATHS = NO; ENABLE_USER_SCRIPT_SANDBOXING = NO;')
 embed=obj('embed', 'isa = PBXShellScriptBuildPhase; buildActionMask = 2147483647; files = (); inputPaths = (); outputPaths = (); runOnlyForDeploymentPostprocessing = 0; alwaysOutOfDate = 1; shellPath = /bin/bash; shellScript = \"\\\"$SRCROOT/scripts/embed-worker.sh\\\"\";')

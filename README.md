@@ -1,65 +1,75 @@
 # Mox
 
-Mox 是 Apple Silicon macOS 上的本机 MLX 模型工作台。App 可获取、管理和测试模型；同一 worker 提供 CLI，以及按需开启的本机 OpenAI Chat Completions 和 Anthropic Messages 文本接口。
+Mox 是面向 Apple Silicon 的本地语言模型工作台。原生 macOS App、CLI 和本地 HTTP API 共用同一模型库和 MLX 推理服务。
 
-## 源码构建
+**当前版本：0.1.0，源码原型。** 本仓库提供源码与本地构建方法，尚未发布签名、公证的安装包；人工体验验收及 macOS 15 真机验证仍待完成。自动测试与独立复核的范围见[验证记录](docs/VERIFICATION.md)。
 
-需要 Apple Silicon Mac、macOS 15 或更新版本、完整 Xcode 及其 Metal Toolchain、Python 3（仅构建脚本使用）。依赖版本锁在 `Package.resolved`。目前真机验收环境是 macOS 27；macOS 15 只是部署目标，尚无真机证据。
+## 功能与限制
 
-```sh
-scripts/build-m4.sh Release
-open .build/m4/Release/Mox.app
-```
+- 从 Hugging Face、ModelScope 和配置的镜像规划、下载、校验并安装模型；支持暂停、继续和故障恢复。
+- 导入现有本地模型目录，管理模型别名、加载、卸载、固定状态和生成参数。
+- 原生聊天界面、流式输出、取消、对话历史与重试分支。
+- CLI 及 OpenAI / Anthropic 风格的本地 API；工具调用由客户端执行。
+- 只支持已适配的 MLX 文本模型。不是任意权重转换器，也不提供多模态、agent、远程部署或任意 API 字段兼容。
 
-CLI 位于 `.build/m4-worker/Release/mox`。App 内嵌同一构建的 worker，不要求用户安装 Python、Homebrew 或独立 CLI。Debug 构建将 `Release` 换为 `Debug`。修改 Swift 源码后请重新运行此脚本；直接在 Xcode 中构建 App 时，嵌入阶段会检查 worker 身份并拒绝使用旧产物。首次 checkout 也先运行此脚本。
+完整支持范围和行为约束见[产品说明](docs/PRODUCT.md)。公共 API 默认关闭，仅监听本机；API 密钥与模型来源凭据分开管理。
 
-## 开始使用
+## 环境要求
 
-App 默认进入模型页。通过“获取模型…”选择 Hugging Face 或 ModelScope 仓库并先查看精确版本与空间计划，或用“添加本地目录…”引用已有 MLX 模型；本地引用不会复制或删除原文件。安装后在模型详情点击“测试此模型”。下载可在下载页暂停、继续或取消。退出 App 时，自己启动的 worker 有活动下载或生成会提示；外部启动的 worker 不由 App 停止。
+运行目标是 **macOS 15 或更新版本、Apple Silicon**。当前验证机器为 macOS 27，不能据此声称 macOS 15 已验证。内存需求取决于模型大小、上下文及并发请求。
 
-CLI 示例（`MODEL_DIR` 指向已有本地 MLX 模型目录）：
+源码构建需要完整 Xcode（Swift **6.3 或更新版本**）、Apple Metal Toolchain、Python 3 与 Git。首轮构建需要联网下载锁定的 Swift 依赖；若 Metal 工具未安装，请在 Xcode 中安装对应组件。Python 仅用于构建和验收脚本，运行 App 不需要 Python。Intel Mac 不在支持范围。
 
-```sh
-.build/m4-worker/Release/mox models import --alias my-model "$MODEL_DIR"
-.build/m4-worker/Release/mox chat --model my-model --prompt '你好' --max-tokens 64
-.build/m4-worker/Release/mox models plan --repository mlx-community/Qwen3-0.6B-4bit
-.build/m4-worker/Release/mox models pull --repository mlx-community/Qwen3-0.6B-4bit
-```
+## 从源码构建
 
-`chat --model` 接受安装 alias 或安装 UUID；`chat --model-path` 只接受本地目录路径。`models list` 列出实际 alias 和 UUID。API 的 `model` 也使用这两种安装标识；模型详情提供可复制的 API 标识。CLI 短操作会连接现有 worker，必要时自启临时 worker；要持续提供 API，可运行 `.build/m4-worker/Release/mox serve`。
-
-App 的模型页可设置全局/单模型生成默认值、查看每项参数的来源，以及固定已安装模型以阻止自动卸载；显式卸载仍可用。CLI 可执行 `mox models sampling --max-tokens 1024` 设置全局值，或 `mox models sampling --temperature 0.2 <安装UUID>` 设置单模型值；`mox models pin <安装UUID>` 与 `mox models pin --off <安装UUID>` 切换固定状态。聊天命令省略参数时继承模型和全局值，stderr 显示实际值及来源。`mox serve --help` 列出当前 worker 生效的默认参数、队列及安全预算启动覆盖；启动覆盖不会写入持久设置。
-
-## 本机 API
-
-公开接口默认关闭。App 的“本机 API”页可开启、复制动态 loopback 地址并显示或重置独立密钥。前台 worker 运行时，CLI 也可执行 `mox api enable`、`mox api status`、`mox api key`。密钥只发给你信任的本机客户端，管理凭据与公开密钥分离。
+检出本仓库后，在仓库根目录运行：
 
 ```sh
-curl "$MOX_API_URL/v1/chat/completions" \
-  -H "Authorization: Bearer $MOX_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"my-model","messages":[{"role":"user","content":"你好"}]}'
+scripts/build.sh Release
 ```
 
-将 `MOX_API_URL` 设为页面显示的地址（不带 `/v1`），`MOX_API_KEY` 设为页面显示的密钥。支持 OpenAI Chat Completions 与 Anthropic Messages 的明确子集，包含文本流式、真实 usage 和客户端执行的工具往返；不提供 Responses、embeddings、多模态、LAN 监听或服务端工具执行。结构化工具调用仅对固定 revision、权重及 tokenizer 摘要均经真机验证的受管 `mlx-community/Qwen3-0.6B-4bit` 安装开放；导入目录和其他模型仅支持已验证的文本能力。完整接收/拒绝字段见 [M4 契约](docs/milestones/M4.md)。
+该入口构建 CLI、官方 MLX 资源和原生 App，并生成本地运行所需的 ad hoc 签名。它不执行 Developer ID 签名、公证或发布。
 
-数据默认位于 `~/Library/Application Support/Mox/`；模型受管文件、下载暂存、运行索引和测试会话分开存储。App 的服务控件可导出脱敏诊断；下载操作 ID、阶段与安全错误码也可在下载页看到。服务诊断获取失败会明确标记不可取得，并仍导出本机诊断；参数保存失败保留编辑草稿供重试。导出不包含密钥、prompt、完整文件路径或带凭据的 URL。测试模型文件和私有凭据不要提交到仓库。
+产物统一位于：
 
-## 验证与限制
+- App：`.build/Release/Mox.app`
+- CLI：`.build/Release/mox`
 
-构建后可按 [源码发布收口报告](docs/acceptance/source-release-h12-2026-10-01.md)运行对应规则、存储、HTTP、App 和真实模型验证；报告区分本轮通过、环境阻塞与待人工验收。真实私有镜像和 macOS 15 尚无环境证据。项目不提供已签名或公证的二进制，Homebrew 分发属于后续阶段。
+`.build` 及模型权重、测试数据均不提交到 Git。调试构建使用 `scripts/build.sh Debug`，输出到 `.build/Debug`。版本号的唯一来源是根目录 [VERSION](VERSION)；源码指纹用于检查 App 与 worker 是否匹配。
 
-开发者可复跑最终产物检查（真实下载两个小模型，约 650 MiB；须使用未存在的 `.build` 子目录，完成后测试数据保留）：
+## 快速开始
 
 ```sh
-python3 -m venv .build/source-release-sdk
-.build/source-release-sdk/bin/python -m pip install openai==3.19.2 anthropic==1.8.0
-python3 scripts/verify-source-release.py --app .build/m4/Release/Mox.app \
-  --data-root .build/source-release-test --sdk-python .build/source-release-sdk/bin/python \
-  --evidence .build/source-release-evidence.json
+open .build/Release/Mox.app
+.build/Release/mox --version
+.build/Release/mox --help
 ```
 
-测试只启动并停止自身的隔离服务，不读取默认用户数据目录；失败日志和证据位于指定 evidence 的同名旁文件。测试目录中的模型和数据库由开发者核对路径后自行清理，脚本不自动删除。
+在 App 中从模型库获取一个适配的 MLX 文本模型，或导入已有本地模型目录，然后进入测试页发送消息。下载较大模型前留出权重、临时下载文件与运行内存所需空间。
 
-服务连通后可能仍在校验模型；界面展示校验状态，目标模型通过检查才开始推理。UUID 形式的自定义别名可用，大小写按 UUID 规则解析；与另一安装 ID 冲突的别名会被拒绝。
+CLI 导入已有模型并聊天：
 
-开发流程见 [CONTRIBUTING](CONTRIBUTING.md)，当前进度见 [HANDOFF](docs/HANDOFF.md)，产品和技术契约分别见 [ARCHITECTURE-DRAFT](ARCHITECTURE-DRAFT.md)与[技术设计](docs/architecture/TECHNICAL-DESIGN.md)。许可证见 [LICENSE](LICENSE)。
+```sh
+.build/Release/mox models import /absolute/path/to/model --alias my-model
+.build/Release/mox chat --model my-model --prompt '用一句话介绍自己'
+```
+
+导入是只读引用，不复制或改写你的模型文件。模型与对话默认存放在用户的 Application Support/Mox 下；自定义数据目录、备份及诊断见[数据说明](docs/DATA.md)。
+
+## 文档与贡献
+
+| 入口 | 内容 |
+| --- | --- |
+| [产品说明](docs/PRODUCT.md) | 功能、限制、模型和对话行为 |
+| [CLI](docs/CLI.md) / [API](docs/API.md) | 命令、协议、鉴权、错误与使用示例 |
+| [来源与镜像](docs/SOURCES.md) | 来源配置、凭据、下载与安装 |
+| [数据与诊断](docs/DATA.md) | 数据位置、备份、恢复及故障定位 |
+| [开发与测试](docs/DEVELOPMENT.md) | 工具链、测试分层、真实模型验证 |
+| [架构](docs/ARCHITECTURE.md) | 工程原则、模块职责、生命周期与存储 |
+| [验证记录](docs/VERIFICATION.md) | 被测版本、证据、人工验收与限制 |
+| [贡献指南](CONTRIBUTING.md) | 贡献流程与审查要求 |
+| [安全报告](SECURITY.md) | 安全问题报告方式 |
+| [第三方声明](THIRD_PARTY.md) / [依赖](docs/DEPENDENCIES.md) | 许可证、固定版本、构建资源 |
+| [变更记录](CHANGELOG.md) / [首版发布文案](docs/RELEASE.md) | 首版说明与发布前提 |
+
+Mox 源码采用 [MIT License](LICENSE)。模型和第三方依赖各自的许可证独立适用。

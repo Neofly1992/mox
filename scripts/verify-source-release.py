@@ -33,7 +33,7 @@ if root.parent != (repo / '.build').resolve() or root.exists():
 subprocess.run([str(args.sdk_python.absolute()), '-c', 'import openai, anthropic'], check=True)
 root.mkdir()
 worker = args.app.resolve() / 'Contents/Helpers/MoxWorker.app/Contents/MacOS/mox'
-evidence = {'buildID': subprocess.check_output([str(worker), '--version'], text=True).split()[0],
+evidence = {'buildID': subprocess.check_output([str(worker), '--version'], text=True).split()[1],
             'dataRoot': str(root), 'checks': []}
 process = None
 discovery = None
@@ -179,7 +179,7 @@ try:
     assert 'Bearer' not in json.dumps(events) and discovery['token'] not in json.dumps(events)
     mark('busy.failure-in-redacted-diagnostics')
     command('api', 'enable')
-    sdk = subprocess.run([str(args.sdk_python.absolute()), str(repo / 'scripts/verify-m4-sdk.py'),
+    sdk = subprocess.run([str(args.sdk_python.absolute()), str(repo / 'scripts/verify-sdk.py'),
         '--app', str(args.app.resolve()), '--data-root', str(root), '--model', item['id']],
         stdout=args.evidence.with_suffix('.sdk.log').open('w'), stderr=subprocess.STDOUT, timeout=900)
     assert sdk.returncode == 0, 'Official SDK probe failed; inspect SDK log.'

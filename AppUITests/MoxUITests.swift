@@ -81,7 +81,7 @@ final class MoxUITests: XCTestCase {
     defer { TISSelectInputSource(keyboard) }
     let app = XCUIApplication()
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "mox-m2-ui-\(UUID().uuidString)"
+      "mox-ui-ui-\(UUID().uuidString)"
     ).path
     app.launchEnvironment["MOX_DATA_ROOT"] = root
     try seed(root)
@@ -152,12 +152,12 @@ extension MoxUITests {
     let keyboard = try useABCKeyboard()
     defer { TISSelectInputSource(keyboard) }
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "mox-m2-ui-fixture-\(UUID().uuidString)"
+      "mox-ui-ui-fixture-\(UUID().uuidString)"
     ).path
     try seed(root)
     let fixture = Process()
     fixture.executableURL = URL(
-      fileURLWithPath: repositoryURL.appendingPathComponent(".build/xcode/Build/Products/Debug/MoxTestSupport")
+      fileURLWithPath: repositoryURL.appendingPathComponent(".build/package/Build/Products/Debug/MoxTestSupport")
         .path)
     fixture.arguments = ["serve", root]
     fixture.standardOutput = FileHandle.standardOutput
@@ -238,7 +238,7 @@ extension MoxUITests {
   fileprivate func seed(_ root: String, mode: String = "seed") throws {
     let process = Process()
     process.executableURL = URL(
-      fileURLWithPath: repositoryURL.appendingPathComponent(".build/xcode/Build/Products/Debug/MoxTestSupport")
+      fileURLWithPath: repositoryURL.appendingPathComponent(".build/package/Build/Products/Debug/MoxTestSupport")
         .path)
     process.arguments = [
       mode, root,
@@ -267,12 +267,12 @@ extension MoxUITests {
     let keyboard = try useABCKeyboard()
     defer { TISSelectInputSource(keyboard) }
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "mox-m2-ui-performance-\(UUID().uuidString)"
+      "mox-ui-ui-performance-\(UUID().uuidString)"
     ).path
     try seed(root)
     let fixture = Process()
     fixture.executableURL = URL(
-      fileURLWithPath: repositoryURL.appendingPathComponent(".build/xcode/Build/Products/Debug/MoxTestSupport")
+      fileURLWithPath: repositoryURL.appendingPathComponent(".build/package/Build/Products/Debug/MoxTestSupport")
         .path)
     fixture.arguments = ["serve", root]
     try fixture.run()
@@ -325,12 +325,12 @@ extension MoxUITests {
     let keyboard = try useABCKeyboard()
     defer { TISSelectInputSource(keyboard) }
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "mox-m2-ui-lifecycle-\(UUID().uuidString)"
+      "mox-ui-ui-lifecycle-\(UUID().uuidString)"
     ).path
     try seed(root)
     let fixture = Process()
     fixture.executableURL = URL(
-      fileURLWithPath: repositoryURL.appendingPathComponent(".build/xcode/Build/Products/Debug/MoxTestSupport")
+      fileURLWithPath: repositoryURL.appendingPathComponent(".build/package/Build/Products/Debug/MoxTestSupport")
         .path)
     fixture.arguments = ["serve", root]
     try fixture.run()
@@ -356,7 +356,7 @@ extension MoxUITests {
     _ = try await NSWorkspace.shared.openApplication(
       at: URL(
         fileURLWithPath: repositoryURL.appendingPathComponent(
-          ".build/m2-app/Build/Products/\(buildConfiguration)/Mox.app"
+          ".build/app/Build/Products/\(buildConfiguration)/Mox.app"
         ).path
       ), configuration: NSWorkspace.OpenConfiguration())
     XCTAssertTrue(app.buttons["stopGeneration"].waitForExistence(timeout: 10))
@@ -377,14 +377,14 @@ extension MoxUITests {
     let keyboard = try useABCKeyboard()
     defer { TISSelectInputSource(keyboard) }
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "mox-m2-ui-loss-\(UUID().uuidString)"
+      "mox-ui-ui-loss-\(UUID().uuidString)"
     ).path
     try seed(root)
     func startFixture() throws -> Process {
       let fixture = Process()
       fixture.executableURL = URL(
         fileURLWithPath: repositoryURL.appendingPathComponent(
-          ".build/xcode/Build/Products/Debug/MoxTestSupport"
+          ".build/package/Build/Products/Debug/MoxTestSupport"
         ).path)
       fixture.arguments = ["serve", root]
       try fixture.run()
@@ -458,7 +458,7 @@ extension MoxUITests {
       "Mox 独立搬迁 \(UUID().uuidString)")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let relocated = try String(
-      contentsOfFile: repositoryURL.appendingPathComponent(".build/m2-relocated-app-path.txt").path,
+      contentsOfFile: repositoryURL.appendingPathComponent(".build/relocated-app-path.txt").path,
       encoding: .utf8
     ).trimmingCharacters(in: .whitespacesAndNewlines)
     let dataRoot = root.appendingPathComponent("数据").path
@@ -488,8 +488,8 @@ extension MoxUITests {
 }
 
 extension MoxUITests {
-  @MainActor func testM4APIControls() throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("mox-m4-api-ui-\(UUID())")
+  @MainActor func testPublicAPIControls() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("mox-api-api-ui-\(UUID())")
     defer { try? FileManager.default.removeItem(at: root) }
     let app = XCUIApplication()
     app.launchEnvironment["MOX_DATA_ROOT"] = root.path
@@ -525,10 +525,10 @@ extension MoxUITests {
     app.terminate()
   }
 
-  @MainActor func testM3ConfiguredMirrorSurvivesAcquireSheet() throws {
+  @MainActor func testConfiguredMirrorSurvivesAcquireSheet() throws {
     let keyboard = try useABCKeyboard()
     defer { TISSelectInputSource(keyboard) }
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("mox-m3-mirror-ui-\(UUID())")
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("mox-acquire-mirror-ui-\(UUID())")
     defer { try? FileManager.default.removeItem(at: root) }
     let app = XCUIApplication()
     app.launchEnvironment["MOX_DATA_ROOT"] = root.path
@@ -554,10 +554,10 @@ extension MoxUITests {
     app.terminate()
   }
 
-  @MainActor func testM3AcquireInstallAndChat() throws {
+  @MainActor func testAcquireInstallAndChat() throws {
     let keyboard = try useABCKeyboard()
     defer { TISSelectInputSource(keyboard) }
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("mox-m3-ui-\(UUID())")
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("mox-acquire-ui-\(UUID())")
     defer { try? FileManager.default.removeItem(at: root) }
     let app = XCUIApplication()
     app.launchEnvironment["MOX_DATA_ROOT"] = root.path

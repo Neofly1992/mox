@@ -6,9 +6,9 @@ if [[ $# -gt 0 ]]; then shift; fi
 case "$mode" in rules|mlx|ui) ;; *) echo 'Usage: scripts/test.sh rules|mlx|ui [Xcode test options]' >&2; exit 2 ;; esac
 scripts/check-toolchain.sh
 python3 scripts/prepare-build.py
-xcodebuild -resolvePackageDependencies -workspace .build/Mox.xcworkspace -scheme MoxCoreTests -derivedDataPath .build/package -skipPackagePluginValidation
+xcodebuild -resolvePackageDependencies -workspace .build/Mox.xcworkspace -scheme MoxCoreTests -derivedDataPath .build/package -skipPackagePluginValidation -onlyUsePackageVersionsFromResolvedFile
 python3 scripts/stamp-build.py
-common=(-configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/package -skipPackagePluginValidation ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO)
+common=(-configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/package -skipPackagePluginValidation -onlyUsePackageVersionsFromResolvedFile ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO)
 case "$mode" in
 rules)
   for scheme in MoxCoreTests MoxServiceTests MoxSourcesTests; do
@@ -27,5 +27,5 @@ ui)
   trap 'rm -rf "$relocated_root"' EXIT
   ditto ".build/$configuration/Mox.app" "$relocated_root/本地聊天.app"
   printf '%s' "$relocated_root/本地聊天.app" > .build/relocated-app-path.txt
-  xcodebuild test -project Mox.xcodeproj -scheme Mox -configuration "$configuration" -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/app -skipPackagePluginValidation ARCHS=arm64 ONLY_ACTIVE_ARCH=YES "$@" ;;
+  xcodebuild test -project Mox.xcodeproj -scheme Mox -configuration "$configuration" -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/app -skipPackagePluginValidation -onlyUsePackageVersionsFromResolvedFile ARCHS=arm64 ONLY_ACTIVE_ARCH=YES "$@" ;;
 esac

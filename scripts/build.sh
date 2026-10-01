@@ -13,11 +13,12 @@ python3 scripts/prepare-build.py
 # SwiftPM may normalize Package.resolved on a fresh checkout. Resolve first so the
 # worker identity covers the exact lockfile that the App embed phase will check.
 xcodebuild -resolvePackageDependencies -workspace ".build/Mox.xcworkspace" \
-  -scheme mox -derivedDataPath .build/package -skipPackagePluginValidation
+  -scheme mox -derivedDataPath .build/package -skipPackagePluginValidation -onlyUsePackageVersionsFromResolvedFile
+python3 scripts/prepare-build.py
 python3 scripts/stamp-build.py
 xcodebuild -workspace ".build/Mox.xcworkspace" -scheme mox -configuration "$configuration" \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/package \
-  -skipPackagePluginValidation ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO DEBUG_INFORMATION_FORMAT="$debug_information" build
+  -skipPackagePluginValidation -onlyUsePackageVersionsFromResolvedFile ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO DEBUG_INFORMATION_FORMAT="$debug_information" build
 products="$PWD/.build/package/Build/Products/$configuration"
 worker="$PWD/.build/$configuration"
 # Staging directories are generated outputs. Never merge obsolete bundles into a new build.
@@ -34,7 +35,7 @@ python3 scripts/collect-licenses.py .build/package/SourcePackages/checkouts "$wo
 rm -rf ".build/app/Build/Products/$configuration/Mox.app"
 xcodebuild -project Mox.xcodeproj -scheme Mox -configuration "$configuration" \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath ".build/app" \
-  -skipPackagePluginValidation ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build
+  -skipPackagePluginValidation -onlyUsePackageVersionsFromResolvedFile ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build
 destination="$PWD/.build/$configuration"
 mkdir -p "$destination"
 rm -rf "$destination/Mox.app" "$destination/Mox.app.dSYM"

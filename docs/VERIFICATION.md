@@ -113,4 +113,6 @@ bda2af31e9807cee196d05d02176aa6c107dbd59650a200fb696709ec646fbcb  repository-rec
 
 ## 2026-10-02 主分支交付
 
-用户已授权在体验验收前先合并 main、推送并检查远端 CI，以查看源码效果；不代表人工验收已通过。标签和 GitHub Release 暂不创建。合并与远端运行结果在执行后记录。
+用户已授权在体验验收前先合并 main、推送并检查远端 CI，以查看源码效果；不代表人工验收已通过。标签和 GitHub Release 暂不创建。已快进合并并推送 `main`，被测提交 `6f5bf09a399cd2f1c191c6f48d652d72a5a35ee0`。
+
+[首次远端运行](https://github.com/Neofly1992/mox/actions/runs/36924471268)：repository 成功，native-rules 在 `scripts/test.sh rules` 失败，退出码 65。公开注释未提供具体编译/测试错误；日志下载 API 返回 403、浏览器要求登录。当前只有 SSH 推送身份，尚无可用 API/浏览器登录，等待用户提供日志访问。不能将失败归因于环境或宣称已修复。此次结果补记仅修改文档，提交使用 `[skip ci]`，不重复启动相同源码的失败运行；获取原因并修复后必须重新运行。

@@ -1,6 +1,6 @@
 # 产品契约
 
-Mox 0.1 是 Apple Silicon macOS 上的本机 MLX 模型工作台和推理服务，是源码原型。当前行为以本契约、[API 子集](API.md)及实际代码为准；验证范围见[首版验证记录](VERIFICATION.md)。
+Mox 0.1.0 是 Apple Silicon macOS 上的本机 MLX 模型工作台和推理服务，是源码原型。当前行为以本契约、[API 子集](API.md)及实际代码为准；验证范围见[首版验证记录](VERIFICATION.md)。
 
 ## 获取、管理和测试
 

@@ -4,6 +4,16 @@ cd "$(dirname "$0")/.."
 mode="${1:-rules}"
 if [[ $# -gt 0 ]]; then shift; fi
 case "$mode" in rules|mlx|ui) ;; *) echo 'Usage: scripts/test.sh rules|mlx|ui [Xcode test options]' >&2; exit 2 ;; esac
+# Xcode test processes receive explicit TEST_RUNNER_ variables, not the caller's
+# whole environment. Forward only documented test inputs.
+if [[ -n "${MOX_TEST_MODEL:-}" ]]; then
+  export TEST_RUNNER_MOX_TEST_MODEL="$(cd "$MOX_TEST_MODEL" && pwd)"
+fi
+if [[ "${MOX_TEST_REAL_SOURCES:-}" == 1 ]]; then export TEST_RUNNER_MOX_TEST_REAL_SOURCES=1; fi
+if [[ -n "${MOX_BENCHMARK_OUTPUT:-}" ]]; then
+  export TEST_RUNNER_MOX_BENCHMARK_OUTPUT="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$MOX_BENCHMARK_OUTPUT")"
+fi
+if [[ -n "${MOX_DECODER_BATCH:-}" ]]; then export TEST_RUNNER_MOX_DECODER_BATCH="$MOX_DECODER_BATCH"; fi
 scripts/check-toolchain.sh
 python3 scripts/prepare-build.py
 xcodebuild -resolvePackageDependencies -workspace .build/Mox.xcworkspace -scheme MoxCoreTests -derivedDataPath .build/package -skipPackagePluginValidation -onlyUsePackageVersionsFromResolvedFile

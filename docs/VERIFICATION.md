@@ -2,7 +2,7 @@
 
 ## 状态与版本
 
-产品版本 **0.1.0**；源码候选尚未发布。人工体验验收：**待用户确认**。仓库收尾的独立复核：**待执行**。
+产品版本 **0.1.0**；源码候选尚未发布。人工体验验收：**待用户确认**。仓库收尾的独立复核：**2026-10-01 通过，未发现新的发布阻塞项**。
 
 - `03038c9`：保存已审查的生产修复、正式故障回归及逐轮证据。
 - `23184a4`：单独保留更早的 M3 独立复核补记。
@@ -63,6 +63,24 @@ SDK 版本实际核对为 OpenAI 3.19.2 / Anthropic 1.8.0；使用已安装的�
 
 LICENSE 保持 MIT / Copyright 2026 Neo；33 个锁定 checkout 顶层许可证逐一核对，嵌套声明递归携带。原始日志/测试数据继续保留在忽略的 .build，下面的摘要哈希帮助核对本机证据；Git 中保存本记录及历史报告，而不提交二进制和测试库。
 
+## 仓库收尾独立复核（2026-10-01）
+
+独立会话检查 `719624a` / `codex/rewrite`，开始时工作树干净。结论：本次文档、长期入口、版本与仓库清理范围内未发现新的必需修复项，可进入用户体验验收和授权后的发布步骤。不替代人工验收，也不声称绝对无缺陷。
+
+独立审查内容：与 `03038c9` 的生产/测试差异、正式产品/架构/CLI/API/来源/数据文档、历史材料保存与正式回归映射、build/test/prepare/embed/stamp 入口、VERSION 和依赖锁、许可证收集、忽略规则、问题模板、安全报告与 Release 文案。生产差异主要为版本展示和移除阶段措辞；关键生命周期实现未借整理改写，原故障回归仍在正式 Tests 中。未恢复旧材料或新增阶段报告。
+
+独立实际执行：
+
+- `python3 scripts/check-repository.py`、`git diff --check` 通过；生成项目和测试入口执行后，跟踪源码仍无变化。
+- `scripts/test.sh rules` 完整运行成功，Core **52**、Service **65**；Sources **5 执行通过、2 联网测试 skipped**。日志 `.build/independent-repository-rules.log`。不是选中 0 项的成功，也不算真实模型或联网验证。测试在沙箱外获准运行；Xcode 27 的既有 simulator/plugin 提示未阻止 macOS 测试。
+- CLI 和内嵌 worker 实际 `--version` 均为 0.1.0 / `mox-49c76ce01a06d50da321a21b058e2bb85d1959b3c2df7d5fcf28932caf269483` / Release；两者 Mach-O UUID 相同。App/worker Info.plist 均为 0.1.0；`codesign --verify --deep --strict .build/Release/Mox.app` 通过。签名使文件字节摘要不同，不把它误判为源码身份不一致。
+- 根/App 的 **33** 个 pins 一致；产物许可证文件 **56** 个。独立核对本记录列出的 **9** 份本机证据文件 SHA256，全部匹配，并检查构建与测试日志的实际完成结果。核对日志不等于本会话重跑那些验证。
+- CI 的 Xcode 26.6 路径与 [GitHub 官方 macOS 26 arm64 镜像清单](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md)一致；工作流仅声明仓库检查和原生规则测试。远端 Actions 未运行，不能据此保证首次远端执行成功。
+
+本轮没有再次执行干净 Release 构建、真实 MLX、SDK、GUI 或全量下载；这些保持为上文实现者证据。macOS 15、私有来源、超大库性能及完整 GUI 等限制不变。未修改生产代码、正式测试、用户数据，未提交、合并、推送、打标签或发布；只更新本记录与 HANDOFF。
+
+下一步：用户确认体验后，按 RELEASE 的顺序核对最终提交、合并/推送并观察远端 CI，再在明确授权下创建标签和源码 Release。发布时同步候选状态与实际发布日期，不将目前的“尚未发布”描述原样当作已发布状态。
+
 ## 限制与人工体验
 
 - macOS 15 是部署目标，尚未真机验证；当前环境为 macOS 27 / Apple Silicon / Xcode 27。
@@ -92,3 +110,7 @@ fcee2fc85af988e1e919b2006297b6dcb8535888219477b0907976f8eab36b84  repository-rul
 fe0f55e5ed0d8b20d07826a1b3b51c870d26b60079d45cc24b278b1a6e121d01  repository-recovery.json
 bda2af31e9807cee196d05d02176aa6c107dbd59650a200fb696709ec646fbcb  repository-recovery.sdk.log
 ```
+
+## 2026-10-02 主分支交付
+
+用户已授权在体验验收前先合并 main、推送并检查远端 CI，以查看源码效果；不代表人工验收已通过。标签和 GitHub Release 暂不创建。合并与远端运行结果在执行后记录。

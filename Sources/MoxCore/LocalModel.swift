@@ -51,7 +51,7 @@ public struct LocalModel: Sendable, Hashable {
       ["qwen2", "qwen3", "llama", "gemma", "gemma2", "gemma3_text", "mistral", "phi3"].contains(
         type)
     else {
-      throw MoxError(.invalidModel, "Model architecture has no verified M1 resource estimate.")
+      throw MoxError(.invalidModel, "Model architecture has no verified resource estimate.")
     }
     modelType = type
     func positive(_ key: String, fallback: Int? = nil) throws -> Int {

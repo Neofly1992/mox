@@ -41,7 +41,7 @@ import SwiftUI
   private var exiting = false
   private var runLoopObserver: CFRunLoopObserver?
   private var busySince: TimeInterval?
-  // Match the M2 continuous main-thread work budget; emitted only in performance mode.
+  // Match the continuous main-thread work budget; emitted only in performance mode.
   private static let slowCycleSeconds = 0.25
   func startPerformanceMonitoring() {
     guard ProcessInfo.processInfo.environment["MOX_PERFORMANCE_REPORT"] != nil else { return }

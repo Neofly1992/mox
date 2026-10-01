@@ -302,7 +302,7 @@ public struct PendingAttempt: Sendable {
 
 /// SwiftData/Core Data share process-wide schema metadata. Serialize construction,
 /// not model actors or saves: concurrent fresh-store initialization crashed inside
-/// NSSQLEntity_DerivedAttributesExtension during the M2 parallel integration tests.
+/// NSSQLEntity_DerivedAttributesExtension during parallel integration tests.
 public actor ConversationContainerFactory {
   public static let shared = ConversationContainerFactory()
   public func create(

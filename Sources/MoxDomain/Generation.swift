@@ -49,11 +49,11 @@ public struct Message: Sendable, Equatable {
   public init(role: Role, text: String) { self.init(role: role, content: [.text(text)]) }
   public func text() throws -> String {
     guard role != .tool else {
-      throw MoxError(.unsupportedInput, "M1 does not support tool messages.")
+      throw MoxError(.unsupportedInput, "This text-only request does not support tool messages.")
     }
     return try content.map { block in
       guard case .text(let text) = block else {
-        throw MoxError(.unsupportedInput, "M1 accepts text content only.")
+        throw MoxError(.unsupportedInput, "This request accepts text content only.")
       }
       return text
     }.joined()
@@ -180,7 +180,7 @@ public struct GenerationRequest: Sendable {
         case .toolResult(let callID, _, _):
           guard message.role == .tool || message.role == .user, pending.remove(callID) != nil
           else { throw MoxError(.invalidParameters, "Tool result has no pending call.") }
-        case .media: throw MoxError(.unsupportedInput, "Media input is not available in M4.")
+        case .media: throw MoxError(.unsupportedInput, "Media input is not supported.")
         }
       }
       if message.role == .user, hasToolResult, !pending.isEmpty {

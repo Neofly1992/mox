@@ -69,3 +69,9 @@ GitHub 工作流有跨平台纯仓库检查，以及 macos-26 arm64 / Xcode 26.6
 `.build` 是可重建输出与隔离测试数据（含模型/数据库），不提交；不要把清理命令指向 Application Support。Python 缓存、venv、SwiftPM 缓存和个人配置也忽略。删除测试数据前核对路径；它可能含唯一失败证据。
 
 贡献流程见 [CONTRIBUTING](../CONTRIBUTING.md)，当前状态见 [HANDOFF](HANDOFF.md)。依赖许可证和嵌套第三方声明见 [DEPENDENCIES](DEPENDENCIES.md) / [THIRD_PARTY](../THIRD_PARTY.md)。
+
+独立 CLI/TTY 回归使用临时 data root，覆盖管道输入、真实 Ctrl-C、退出信号、Unicode 路径与流式输出：
+
+```sh
+python3 scripts/verify-cli.py --binary .build/Release/mox --model /absolute/path/to/test-model
+```

@@ -304,9 +304,9 @@ extension MoxUITests {
     XCTAssertTrue(app.wait(for: .notRunning, timeout: 20))
     let data = try Data(contentsOf: URL(fileURLWithPath: root + "/performance.json"))
     let report = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: [String: Any]])
-    print("M2 PERFORMANCE", String(decoding: data, as: UTF8.self))
+    print("UI PERFORMANCE", String(decoding: data, as: UTF8.self))
     let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
-    attachment.name = "M2-performance"
+    attachment.name = "UI-performance"
     attachment.lifetime = .keepAlways
     add(attachment)
     let stops = try XCTUnwrap(report["stopPresentation"])

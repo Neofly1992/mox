@@ -92,7 +92,7 @@ actor MLXLoadedModel: LoadedModel {
         guard promptTokens <= 8192, promptTokens + request.sampling.maxTokens <= limit else {
           throw MoxError(
             .contextLimit,
-            "Tokenized input plus requested output exceeds model context or the M1 8192-token input budget; history was not truncated."
+            "Tokenized input plus requested output exceeds model context or the 8192-token input budget; history was not truncated."
           )
         }
         try Task.checkCancellation()
@@ -258,7 +258,7 @@ actor MLXLoadedModel: LoadedModel {
           flushCalls()
           result.append(.tool(isError ? "Error: \(value)" : value, id: id))
         case .media:
-          throw MoxError(.unsupportedInput, "Media input is not available in M4.")
+          throw MoxError(.unsupportedInput, "Media input is not supported.")
         }
       }
       flushText()

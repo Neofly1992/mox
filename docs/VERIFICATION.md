@@ -84,7 +84,7 @@ LICENSE 保持 MIT / Copyright 2026 Neo；33 个锁定 checkout 顶层许可证�
 ## 限制与人工体验
 
 - macOS 15 是部署目标，尚未真机验证；当前环境为 macOS 27 / Apple Silicon / Xcode 27。
-- GitHub CI 配置已依据官方 runner 和 Xcode 清单设计，但远端运行尚未发生。规则测试不等于真实 MLX、GUI 或官方 SDK 验证。
+- GitHub 远端 CI 已在 2026-10-02 修复测试时序后通过，见下方交付记录。规则测试不等于真实 MLX、GUI 或官方 SDK 验证。
 - 本次不做签名、公证、Homebrew、二进制发布或默认用户数据操作。
 - 本轮未重新执行双源全量网络下载、完整 GUI 矩阵、真实私有来源/镜像、超大模型库耗时、全部模型架构或性能基准。`verify-source-release.py`、`verify-runtime.py`、`benchmark-history.py` 本轮只检查语法/帮助入口，不把它们的历史执行当作新通过。
 - 干净构建、最终模型/API/CLI/GUI 定向路径已经实测，无当前环境阻塞的必需基础验证；上述未验证范围须由独立复核和用户决定发布取舍。
@@ -122,3 +122,9 @@ bda2af31e9807cee196d05d02176aa6c107dbd59650a200fb696709ec646fbcb  repository-rec
 登录 GitHub 后读取原生日志：Service 65 项中仅 `unconsumedClientQueueFailsAndReleasesLease` 失败（约 61.7 秒），提示 Unconsumed stream must fail；不是编译失败。旧测试固定 sleep 1 秒后开始消费，慢 runner 尚未填满 128 事件队列，随后消费使其失去不消费前提。修复测试在 15 秒有界期限内通过管理接口观察自动取消终态，然后消费并检查 slowConsumer、lease=0；fixture 每事件 10ms，刻意确保填满耗时大于旧的 1 秒。没有增大生产期限、跳过断言或显式取消来伪造通过。
 
 本机修正后 `scripts/test.sh rules`：Core 52、Service 65、Sources 5 执行通过 / 2 联网 skipped；目标测试约 1.785 秒。日志 `.build/ci-overflow-fix-final.log`。首次新增断言误用非 Equatable 枚举的 ==，编译失败后改为模式匹配并完整重跑，不计首次为通过。仓库检查和差异检查通过，生产指纹不变。远端复跑结果待确认。
+
+### 远端复跑结果（2026-10-02）
+
+修复提交 `50130f1` 的 [GitHub Actions 运行 36931298790](https://github.com/Neofly1992/mox/actions/runs/36931298790) 已完成，公开 jobs API 独立核对：`repository` 与 `native-rules` 均为 completed / success。本轮合并、推送和远端 CI 目标已完成；不代表用户体验、真实 MLX 或 GUI 的新增验证，不创建版本标签或 Release。
+
+结果补记只改文档，使用 `[skip ci]` 避免重复执行相同测试源码；最终被 CI 验证的代码提交明确为 `50130f1`，生产指纹未变。上方失败和定位记录保留追溯。

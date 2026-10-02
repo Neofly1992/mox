@@ -14,10 +14,12 @@ Mox **0.1.0** 首版源码仓库收尾已实施并完成实现者定向验证；
 
 隔离检出从无 .build 开始构建；最终 Release、Core 52 / Service 65 / Sources 7、真实 MLX 9（1 基准 skipped）、GUI 4、CLI/搬移/恢复及两官方 SDK 已本轮验证。详见唯一验证记录，不从历史推定未测范围。
 
-macOS 15 真机、远端 CI、完整 GUI/模型覆盖、私有来源/镜像及全量双源重新下载未验证。H1/H2 历史独立关闭；本轮仓库整理在 `719624a` 独立复核通过，无新增阻塞项。独立运行统一 rules 入口：Core 52、Service 65、Sources 5 执行通过/2 联网 skipped；检查、版本、pins、签名及证据摘要核对通过。人工体验结果未代填。
+macOS 15 真机、完整 GUI/模型覆盖、私有来源/镜像及全量双源重新下载未验证。H1/H2 历史独立关闭；本轮仓库整理在 `719624a` 独立复核通过，无新增阻塞项。独立运行统一 rules 入口：Core 52、Service 65、Sources 5 执行通过/2 联网 skipped；检查、版本、pins、签名及证据摘要核对通过。人工体验结果未代填。
 
 最终 App：`.build/Release/Mox.app`；CLI：`.build/Release/mox`。构建产物、模型、缓存和测试数据全部忽略；没有操作默认用户模型、对话或凭据。旧材料已保存 Git 后删除，无 archive 包袱。
 
-## 下一步
+## 远端交付与下一步
 
-用户按验证记录完成三项体验；本轮独立结果已写入同一记录，与实现者证据分开。2026-10-02 用户授权先合并 main、推送并检查远端 CI，不以人工体验验收作为此次推送前置。已将 `codex/rewrite` 快进合并并推送 `main`（`6f5bf09`）。[首次远端 CI](https://github.com/Neofly1992/mox/actions/runs/36924471268)：repository 通过，native-rules 失败（Xcode exit 65）；登录后已确认唯一失败为 `unconsumedClientQueueFailsAndReleasesLease`：测试固定等待 1 秒便消费输出，在慢 runner 上未形成队列溢出。已改为有界等待服务端自动取消终态，再检查 slowConsumer 与 lease 释放，不改变生产逻辑。本机 Core 52 / Service 65 / Sources 5（2 联网 skipped）通过，远端复跑待确认；v0.1.0 标签、源码 Release 和远端分支清理不在此次授权内。
+2026-10-02 已按用户授权将重写分支快进合并并推送 main。首次 CI 发现不消费队列测试的固定 1 秒等待假设；`50130f1` 改为有界等待自动取消终态，生产逻辑与指纹不变。[修复后远端 CI](https://github.com/Neofly1992/mox/actions/runs/36931298790) 的 repository、native-rules 均成功，已独立读取 GitHub 状态确认。详细失败与修复证据见验证记录。
+
+用户可直接查看 main 并进行体验验收；v0.1.0 标签、源码 Release 和远端分支清理尚未执行，不在此次授权内。本次仅补记 CI 结果的文档提交使用 `[skip ci]`，被测代码仍为 `50130f1`。

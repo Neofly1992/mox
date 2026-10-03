@@ -34,6 +34,7 @@ def validate_app(app, version, identity):
         subprocess.run(['codesign', '--verify', '--deep', '--strict', str(bundle)], check=True)
         signature = subprocess.run(['codesign', '-d', '-vv', str(bundle)], capture_output=True, text=True, check=True)
         require('Signature=adhoc' in signature.stderr, 'This packager only accepts explicitly ad hoc builds.')
+    require(identity.encode() in (app / 'Contents/MacOS/Mox').read_bytes(), 'App source identity mismatch')
     reported = run(str(worker / 'Contents/MacOS/mox'), '--version')
     require(reported == f'{version} {identity} (Release)', f'Worker identity mismatch: {reported}')
     resources = worker / 'Contents/Resources'

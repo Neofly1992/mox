@@ -74,6 +74,37 @@ class ReleaseSafetyTests(unittest.TestCase):
         draft.upload(api, 'v0.1.0', self.directory)
         self.assertEqual(len(api.writes), 4)
 
+    def test_partial_upload_can_retry_without_overwriting(self):
+        class InterruptedGitHub(FakeGitHub):
+            interrupted = False
+
+            def request(self, path, **kwargs):
+                if kwargs.get('data') is not None and len(self.writes) == 1 and not self.interrupted:
+                    self.interrupted = True
+                    raise TimeoutError('simulated upload failure')
+                return super().request(path, **kwargs)
+
+        api = InterruptedGitHub()
+        with self.assertRaises(TimeoutError):
+            draft.upload(api, 'v0.1.0', self.directory)
+        self.assertEqual(api.writes, ['app.zip'])
+        draft.upload(api, 'v0.1.0', self.directory)
+        self.assertEqual(len(api.writes), 3)
+        self.assertEqual(api.writes.count('app.zip'), 1)
+
+    def test_becoming_public_stops_remaining_uploads(self):
+        class PublishedGitHub(FakeGitHub):
+            def request(self, path, **kwargs):
+                result = super().request(path, **kwargs)
+                if kwargs.get('data') is not None:
+                    self.release['draft'] = False
+                return result
+
+        api = PublishedGitHub()
+        with self.assertRaises(SystemExit):
+            draft.upload(api, 'v0.1.0', self.directory)
+        self.assertEqual(api.writes, ['app.zip'])
+
     def test_public_release_is_never_modified(self):
         api = FakeGitHub(public=True)
         with self.assertRaises(SystemExit):

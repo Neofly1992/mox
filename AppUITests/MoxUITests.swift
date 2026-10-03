@@ -89,17 +89,44 @@ final class MoxUITests: XCTestCase {
     openTesting(app)
     // Deterministic sampling and a prompt verified by the real-model benchmark
     // keep the cancellation scenario independent of a randomly short answer.
-    let parameters = app.disclosureTriangles["生成参数"]
-    // SwiftUI exposes the label and arrow together; click the visible arrow.
-    let disclosureArrow = parameters.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5))
-    disclosureArrow.click()
+    let parameters = app.buttons["samplingDisclosure"]
+    XCTAssertTrue(parameters.waitForExistence(timeout: 5))
+    parameters.click()
     let temperature = app.textFields["temperature"]
     XCTAssertTrue(temperature.waitForExistence(timeout: 5))
     temperature.click()
     temperature.typeKey("a", modifierFlags: .command)
     temperature.typeText("0")
     temperature.typeKey(.return, modifierFlags: [])
-    disclosureArrow.click()
+    let sources = app.staticTexts["samplingSources"]
+    XCTAssertTrue(sources.waitForExistence(timeout: 10))
+    let explicitSource = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "温度：本次请求", "温度：本次请求"),
+      object: sources)
+    XCTAssertEqual(XCTWaiter.wait(for: [explicitSource], timeout: 10), .completed)
+    app.buttons["恢复模型/全局默认"].click()
+    let inheritedSource = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == true AND NOT (label CONTAINS %@ OR value CONTAINS %@)", "本次请求", "本次请求"),
+      object: sources)
+    XCTAssertEqual(XCTWaiter.wait(for: [inheritedSource], timeout: 10), .completed)
+    // Reconfirming the same inherited value is intentional; a programmatic
+    // refresh alone must never turn it into a request override.
+    temperature.click()
+    temperature.typeKey(.return, modifierFlags: [])
+    let sameValueSource = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "温度：本次请求", "温度：本次请求"),
+      object: sources)
+    XCTAssertEqual(XCTWaiter.wait(for: [sameValueSource], timeout: 10), .completed)
+    app.buttons["恢复模型/全局默认"].click()
+    let restoredAgain = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == true AND NOT (label CONTAINS %@ OR value CONTAINS %@)", "本次请求", "本次请求"),
+      object: sources)
+    XCTAssertEqual(XCTWaiter.wait(for: [restoredAgain], timeout: 10), .completed)
+    temperature.click()
+    temperature.typeKey("a", modifierFlags: .command)
+    temperature.typeText("0")
+    temperature.typeKey(.return, modifierFlags: [])
+    parameters.click()
     XCTAssertTrue(app.buttons["chooseModel"].waitForExistence(timeout: 20))
     XCTAssertTrue(
       app.staticTexts.matching(

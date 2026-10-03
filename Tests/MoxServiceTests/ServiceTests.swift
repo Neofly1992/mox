@@ -285,12 +285,40 @@ func serviceRequest() throws -> GenerationRequest {
   for _ in 0..<4 {
     let enable = Task { try await manager.setEnabled(true) }
     let disable = Task { try await manager.setEnabled(false) }
+    let rotating = Task { try await manager.rotateKey() }
     _ = try await enable.value
     _ = try await disable.value
+    let rotated = try await rotating.value
     let saved = try await downloads.snapshot().configuration.publicAPIEnabled
     let live = await manager.status()
     #expect(live.enabled == saved)
     #expect(live.enabled == (live.endpoint != nil))
+    let current = try await manager.currentKey()
+    #expect(current?.key == rotated.key)
+    #expect(current?.credentialID == rotated.credentialID)
+    _ = try await manager.setEnabled(true)
+    #expect(await manager.authorize(rotated.key))
+    let endpoint = try #require(await manager.status().endpoint)
+    let publicClient = ServiceClient(discovery: .init(
+      identity: await service.identity, privateEndpoint: endpoint, token: rotated.key))
+    try await Task.detached {
+      let peer = try SocketPeer(client: publicClient)
+      try peer.send(Data("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(rotated.key)\r\nContent-Type: application/json\r\nContent-Length: \(Wire.bodyLimit + 1)\r\n\r\n".utf8))
+      var response = try peer.receiveHead()
+      var bytes = [UInt8](repeating: 0, count: 4096)
+      var count: Int
+      repeat {
+        count = recv(peer.fd, &bytes, bytes.count, 0)
+        if count > 0 { response += String(decoding: bytes.prefix(count), as: UTF8.self) }
+      } while count > 0
+      #expect(count == 0)
+      #expect(response.contains(" 413 "))
+      #expect(response.contains("bodyTooLarge"))
+    }.value
+    #expect(await manager.status().credentialID == rotated.credentialID)
+    _ = try await manager.setEnabled(false)
+    #expect(await manager.authorize(rotated.key) == false)
+    #expect(try await downloads.configuration().publicAPIEnabled == false)
   }
   await service.shutdown()
 }

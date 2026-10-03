@@ -1,12 +1,12 @@
 # 项目续接
 
-开始任务先读 `docs/HANDOFF.md`，再按其中的入口阅读当前产品、架构和验证记录，不需要重放聊天历史。
+开始任务阅读 `docs/PRODUCT.md`、`docs/ARCHITECTURE.md`、`docs/DEVELOPMENT.md` 和 `docs/VALIDATION.md`，以实际源码和 Git 状态为准，不依赖聊天历史。
 
 实现与审查先读 `docs/ARCHITECTURE.md` 第 0 节，遵循 `CONTRIBUTING.md` 的入口、自测、出口和人工验收流程。AI 自测和独立复核都不能代替用户验收。
 
 - 无未发布旧实现的兼容负担；不恢复旧实现，也不能借清理删除用户模型、对话或凭据。
 - 修改前检查 Git 分支、状态和实际源码，保留不属于任务的修改。
-- 产品与技术契约分别维护在 `docs/PRODUCT.md` 和 `docs/ARCHITECTURE.md`；同步相应用户文档，不在 HANDOFF 复制规格。
-- 结束实现任务前更新 `docs/VERIFICATION.md` 和精简 HANDOFF，准确区分本轮运行、历史证据、环境阻塞及人工验收。
+- 产品与技术契约分别维护在 `docs/PRODUCT.md` 和 `docs/ARCHITECTURE.md`；同步相应用户文档，不在过程记录复制规格。
+- 结束实现任务时在交付说明或 PR 中记录验证结果，准确区分本轮运行、历史证据、环境阻塞及人工验收；公开验证边界改变时更新 `docs/VALIDATION.md`。内部交接、逐轮评审和原始日志不入 Git。
 - 版本唯一来源为 `VERSION`；构建与测试入口为 `scripts/build.sh` 和 `scripts/test.sh`。构建产物、权重和测试数据不入 Git。
 - 用户当前指令优先；普通实施选择自行推进，实质产品或架构取舍说明依据。提交、合并、推送、标签、发布各自需要对应授权。

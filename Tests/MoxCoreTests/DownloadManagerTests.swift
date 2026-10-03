@@ -421,3 +421,51 @@ func damagedInstallationDoesNotBlockHealthyRecovery(kind: String) async throws {
   try await manager.removeInstallation(installed[0].id)
   #expect(try await manager.snapshot().installations.first?.alias == manifests[1].origin.preferredAlias)
 }
+
+private actor TerminalSaveFailureLibrary: SnapshotTestPersistence {
+  var value = ModelLibrarySnapshot()
+  var failNextTerminal = true
+  func readLibrary() -> ModelLibrarySnapshot { value }
+  func saveLibrary(_ snapshot: ModelLibrarySnapshot) throws {
+    if failNextTerminal, snapshot.operations.contains(where: { $0.phase == .failed }) {
+      failNextTerminal = false
+      throw MoxError(.storageFailed, "Injected terminal save failure")
+    }
+    value = snapshot
+  }
+}
+
+@Test func unsavedDownloadFailureRemainsVisibleAndSameTaskCanRetry() async throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let manifest = ArtifactManifest(origin: .init(registryID: UUID(), repository: "fixture/terminal",
+    revision: String(repeating: "f", count: 40)), files: [
+      .init(path: "config.json", bytes: 2, digest: .sha256(String(repeating: "a", count: 64)))])
+  let db = TerminalSaveFailureLibrary()
+  let manager = DownloadManager(persistence: db, artifacts: try ArtifactStore(root: root))
+  let id = try await manager.create(provider: .huggingFace,
+    endpoint: URL(string: "https://huggingface.co")!, manifest: manifest)
+  try await manager.resume(id, source: FailingDomainSource())
+  let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+  while try await manager.operation(id).errorCode != "storageFailed", ContinuousClock.now < deadline {
+    try await Task.sleep(for: .milliseconds(10))
+  }
+  #expect(try await manager.operation(id).phase == .failed)
+  #expect(try await manager.operation(id).errorCode == "storageFailed")
+  #expect(await db.readLibrary().operations.first?.phase == .downloading)
+  // The terminal overlay is published just before the runner releases admission.
+  let admissionDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+  while true {
+    do { try await manager.resume(id, source: FailingDomainSource()); break }
+    catch let error as MoxError where error.code == .busy && ContinuousClock.now < admissionDeadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+  }
+  let retryDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+  while await db.readLibrary().operations.first?.phase != .failed, ContinuousClock.now < retryDeadline {
+    try await Task.sleep(for: .milliseconds(10))
+  }
+  #expect(try await manager.operation(id).errorCode == "sourceFailed")
+  #expect(await db.readLibrary().operations.first?.phase == .failed)
+  await manager.shutdown()
+}

@@ -2,7 +2,7 @@
 
 Mox 是面向 Apple Silicon 的本地语言模型工作台。原生 macOS App、CLI 和本地 HTTP API 共用同一模型库和 MLX 推理服务。
 
-**当前版本：0.1.0，源码原型。** 本仓库提供源码与本地构建方法，尚未发布签名、公证的安装包；人工体验验收及 macOS 15 真机验证仍待完成。自动测试与独立复核的范围见[验证记录](docs/VERIFICATION.md)。
+**当前版本：0.1.0，源码原型。** 本仓库提供源码与本地构建方法，尚未发布签名、公证的安装包；人工体验验收及 macOS 15 真机验证仍待完成。自动测试与独立复核的范围见[验证记录](docs/VALIDATION.md)。
 
 ## 功能与限制
 
@@ -66,7 +66,7 @@ CLI 导入已有模型并聊天：
 | [数据与诊断](docs/DATA.md) | 数据位置、备份、恢复及故障定位 |
 | [开发与测试](docs/DEVELOPMENT.md) | 工具链、测试分层、真实模型验证 |
 | [架构](docs/ARCHITECTURE.md) | 工程原则、模块职责、生命周期与存储 |
-| [验证记录](docs/VERIFICATION.md) | 被测版本、证据、人工验收与限制 |
+| [验证记录](docs/VALIDATION.md) | 被测版本、证据、人工验收与限制 |
 | [贡献指南](CONTRIBUTING.md) | 贡献流程与审查要求 |
 | [安全报告](SECURITY.md) | 安全问题报告方式 |
 | [第三方声明](THIRD_PARTY.md) / [依赖](docs/DEPENDENCIES.md) | 许可证、固定版本、构建资源 |

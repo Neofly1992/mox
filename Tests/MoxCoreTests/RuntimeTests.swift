@@ -452,3 +452,36 @@ func runtime(_ backend: ProbeBackend, queue: Int = 8, timeout: Duration = .secon
   #expect(await core.snapshot().reservedBytes == 0)
   #expect(await core.snapshot().residentModels == 0)
 }
+
+@Test func sequentialEventConsumptionAfterCancellationDrainsOneTerminal() async {
+  let handle = GenerationHandle(requestID: UUID())
+  #expect(handle.emit(.contentDelta("first")))
+  var first = handle.events.makeAsyncIterator()
+  #expect(await first.next()?.sequence == 0)
+  handle.cancel()
+  handle.finish(.finished(.stop))
+  var remaining: [GenerationEvent] = []
+  for await event in handle.events { remaining.append(event) }
+  #expect(remaining.count == 1)
+  if case .finished(.cancelled) = remaining.first?.payload {} else {
+    Issue.record("Expected reserved cancellation terminal")
+  }
+  #expect(await first.next() == nil)
+}
+
+@Test func localReferenceMetadataCheckIncludesNamesAndHasNoContentHashGuarantee() throws {
+  let model = try fixture()
+  defer { try? FileManager.default.removeItem(at: model.directory) }
+  let tokenizer = model.directory.appendingPathComponent("tokenizer.json")
+  // Whole-second fixture avoids Date-to-filesystem rounding differences; it also
+  // represents a source with coarse timestamp resolution.
+  let modified = Date(timeIntervalSince1970: 1_700_000_000)
+  try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: tokenizer.path)
+  let reference = try LocalModel(path: model.directory.path)
+  try Data("[]".utf8).write(to: tokenizer)
+  try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: tokenizer.path)
+  // Referenced directories deliberately use metadata checks, not managed-artifact digests.
+  try reference.validateUnchanged()
+  try FileManager.default.moveItem(at: tokenizer, to: model.directory.appendingPathComponent("renamed.json"))
+  #expect(throws: MoxError.self) { try reference.validateUnchanged() }
+}

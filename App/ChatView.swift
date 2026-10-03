@@ -11,6 +11,8 @@ struct ChatView: View {
   @State private var showSessions = true
   @State private var displayedAttempts: [UUID: UUID] = [:]
   @State private var parametersExpanded = false
+  private enum SamplingField: Hashable { case maxTokens, temperature }
+  @FocusState private var samplingFocus: SamplingField?
   @State private var showDelete = false
   @State private var stopStarted: TimeInterval?
   var body: some View {
@@ -138,30 +140,54 @@ struct ChatView: View {
               .quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8)
             )
             .accessibilityIdentifier("composer")
-          DisclosureGroup("生成参数", isExpanded: $parametersExpanded) {
-            HStack {
-              Text("最大输出")
-              TextField("tokens", value: Binding(get: { chat.maxTokens }, set: {
-                chat.setMaxTokensOverride($0)
-              }), format: .number).frame(width: 65)
-                .accessibilityIdentifier("maxTokens")
-              Text("温度")
-              TextField("温度", value: Binding(get: { chat.temperature }, set: {
-                chat.setTemperatureOverride($0)
-              }), format: .number).frame(width: 65)
-                .accessibilityIdentifier("temperature")
-            }.disabled(chat.isWorking || chat.isClosing)
-            if let effective = chat.effectiveSampling {
-              Text("最大输出：\(samplingSourceLabel(effective.maxTokensSource)) · 温度：\(samplingSourceLabel(effective.temperatureSource)) · top-p：\(samplingSourceLabel(effective.topPSource))")
-                .font(.caption).foregroundStyle(.secondary)
+          VStack(alignment: .leading, spacing: 8) {
+            // Keep disclosure state in SwiftUI. AppKit's native disclosure layout
+            // loops when this region changes height inside the nested split view.
+            Button {
+              parametersExpanded.toggle()
+            } label: {
+              Label("生成参数", systemImage: parametersExpanded ? "chevron.down" : "chevron.right")
             }
-            Button("恢复模型/全局默认") {
-              chat.maxTokensExplicit = false
-              chat.temperatureExplicit = false
-              Task { await chat.refreshEffectiveSampling() }
-            }.disabled(chat.isWorking || chat.isClosing)
-            Text("仅影响后续请求；留空的模型设置由全局或产品默认值决定。")
-              .font(.caption)
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("samplingDisclosure")
+            .accessibilityValue(parametersExpanded ? "已展开" : "已折叠")
+            if parametersExpanded {
+              HStack {
+                Text("最大输出")
+                TextField("tokens", value: Binding(get: { chat.maxTokens }, set: {
+                  // Numeric fields also reconcile programmatic updates. Only
+                  // editing submits intent; submitting an unchanged value is explicit too.
+                  if samplingFocus == .maxTokens, $0 != chat.maxTokens {
+                    chat.setMaxTokensOverride($0)
+                  }
+                }), format: .number).frame(width: 65)
+                  .focused($samplingFocus, equals: .maxTokens)
+                  .onSubmit { chat.setMaxTokensOverride(chat.maxTokens) }
+                  .accessibilityIdentifier("maxTokens")
+                Text("温度")
+                TextField("温度", value: Binding(get: { chat.temperature }, set: {
+                  if samplingFocus == .temperature, $0 != chat.temperature {
+                    chat.setTemperatureOverride($0)
+                  }
+                }), format: .number).frame(width: 65)
+                  .focused($samplingFocus, equals: .temperature)
+                  .onSubmit { chat.setTemperatureOverride(chat.temperature) }
+                  .accessibilityIdentifier("temperature")
+              }.disabled(chat.isWorking || chat.isClosing)
+              if let effective = chat.effectiveSampling {
+                Text("最大输出：\(samplingSourceLabel(effective.maxTokensSource)) · 温度：\(samplingSourceLabel(effective.temperatureSource)) · top-p：\(samplingSourceLabel(effective.topPSource))")
+                  .font(.caption).foregroundStyle(.secondary)
+                  .accessibilityIdentifier("samplingSources")
+              } else if let failure = chat.samplingPreviewError {
+                Text(failure).font(.caption).foregroundStyle(.red)
+              }
+              Button("恢复模型/全局默认") {
+                samplingFocus = nil
+                Task { await chat.restoreSamplingDefaults() }
+              }.disabled(chat.isWorking || chat.isClosing)
+              Text("仅影响后续请求；留空的模型设置由全局或产品默认值决定。")
+                .font(.caption)
+            }
           }
           HStack {
             Spacer()

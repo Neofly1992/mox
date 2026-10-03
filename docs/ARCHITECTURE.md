@@ -54,7 +54,7 @@ HF 使用锁定官方 swift-huggingface 的元数据、分页、认证接口，�
 
 恢复句柄是优化，不保证任意崩溃后 byte resume。已完成文件复用，失效 partial 明确重下；内容 digest、Git blob ID、opaque ETag 分开处理。缺文件/摘要不符/manifest 损坏标记不可用，保留可移除记录。
 
-本地引用规范化路径、检查必要资产与有界 safetensors header/index；加载前后检查资产大小/修改时间，不声称能防止其他进程改写。移除不删除原文件；模型使用/准备和删除按 Core 门闩协调。
+本地引用规范化路径、检查必要资产与有界 safetensors header/index；加载前后检查资产大小/修改时间，不声称能防止其他进程改写；同长度内容修改且时间戳被保留或文件系统时间分辨率不足时，元数据检查可能无法发现。受管安装的完整性校验另用 manifest 内容摘要。移除不删除原文件；模型使用/准备和删除按 Core 门闩协调。
 
 ## 4. Runtime 与 MLX 边界
 
@@ -74,7 +74,7 @@ RuntimeStore 的配置/安装/任务按身份分别查询与更新，关联 Libr
 
 ConversationStore 由 GUI 侧唯一逻辑 writer 拥有，每个 store 由独立 ModelActor 隔离，容器构造串行。记录按稳定顺序分页；内容和参数的磁盘编码不依赖 HTTP DTO。磁盘 schema 是正式初始格式，未来发布后的演进另行设计；打开失败不能回退空库。备份与数据权限见 DATA。
 
-显式 save 保证配置、任务和终态；流式 checkpoint 有命名节奏与有界队列，不依赖 autosave、不承诺逐 token 落盘。崩溃可能丢最后 checkpoint 后少量文本并标 interrupted。有效参数唯一规则是 Domain EffectiveSampling，逐字段来源可查询，启动覆盖不回写。
+显式 save 保证配置、任务和终态；流式 checkpoint 有命名节奏与有界队列，不依赖 autosave、不承诺逐 token 落盘。崩溃可能丢最后 checkpoint 后少量文本并标 interrupted。有效参数唯一规则是 Domain EffectiveSampling，逐字段来源可查询，启动覆盖不回写。ChatController 的预览与发送使用同一当前覆盖快照，解析仍由服务/Core 执行；预览任务由控制器拥有并取消，响应按读取 ID、连接 epoch、模型路径及覆盖值核对后才能更新界面。预览失败保留输入；后续编辑不能修改已经建立的生成请求。原生数值控件的程序刷新不代表用户覆盖意图，界面只提交聚焦编辑的值变化或明确回车，恢复默认先结束编辑。参数展开使用原生按钮与 SwiftUI 状态，避免嵌套 split view 内 DisclosureGroup 的约束循环。
 
 GUI feature state 用 SwiftUI/Observation，必要系统交互用 AppKit。模型、下载、测试和 API 导航职责清晰，会话列表仅在测试内部；模型详情/列表不拥有业务任务。历史使用稳定 ID 与惰性分段，活动回复与已结束呈现分离；切换读取丢弃迟到结果，未保存 live 回复独立保留。
 
@@ -84,4 +84,4 @@ Unified Logging 按 storage/download/runtime/server/gui/process 分类，安全�
 
 VERSION 是产品版本唯一来源；build fingerprint 标识生产源码/锁文件/构建输入，wire version 标识协议。Debug/Release 配置单独报告，App、CLI 与嵌入 worker 指纹一致。产物相对 Bundle 定位资源，不依赖构建机 PATH。
 
-规则、真实存储/HTTP、MLX、UI、SDK 与人工体验各自记录，不混用。测试只用隔离根和公开模型，故障注入测试正式纳入 Tests；历史评审材料从 Git 查阅。有效边界验证包括竞争启动、共享加载/校验、取消、慢消费者、提交不确定、重启、损坏/冲突、参数保存失败、隐私及模型引用所有权。具体入口见 DEVELOPMENT，实际结果见 VERIFICATION。
+规则、真实存储/HTTP、MLX、UI、SDK 与人工体验各自记录，不混用。测试只用隔离根和公开模型，故障注入测试正式纳入 Tests；历史评审材料从 Git 查阅。有效边界验证包括竞争启动、共享加载/校验、取消、慢消费者、提交不确定、重启、损坏/冲突、参数保存失败、隐私及模型引用所有权。具体入口见 DEVELOPMENT，验证范围见 VALIDATION。

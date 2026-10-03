@@ -10,6 +10,7 @@ private actor SuspendedStore: ConversationStoring {
   let store: ConversationStore
   var pending: CheckedContinuation<Void, Never>?
   var armed = false
+  var begunSampling: Sampling?
   var isWaiting: Bool { pending != nil }
   init(_ store: ConversationStore) { self.store = store }
   func arm() { armed = true }
@@ -29,6 +30,7 @@ private actor SuspendedStore: ConversationStoring {
   func begin(
     conversationID: UUID, prompt: String, modelPath: String, sampling: Sampling, retryOf: UUID?
   ) async throws -> PendingAttempt {
+    begunSampling = sampling
     if armed {
       armed = false
       await withCheckedContinuation { pending = $0 }
@@ -196,6 +198,69 @@ func retryPreservesDraftAndNewSendConsumesOnlyItsOwnDraft(editDuringPreparation:
       #expect(snapshot.attempts.last?.prompt == (retry ? "original question" : "next question"))
       #expect(await chat.live?.status == "stop")
     }
+    #expect(await chat.shutdown())
+  }
+  withExtendedLifetime(ownership) {}
+}
+
+@Test func samplingPreviewIncludesOverridesBeforeSendingAndAfterReconnect() async throws {
+  let root = try temporaryRoot()
+  defer { try? FileManager.default.removeItem(at: root) }
+  let files = try ServiceFiles(path: root.path)
+  let ownership = try files.lock()
+  let model = try serviceModel()
+  defer { try? FileManager.default.removeItem(at: model.directory) }
+  let store = try await ConversationStore.open(root: root)
+  let barrier = SuspendedStore(store)
+  try await withService(rootIdentity: files.rootIdentity) { client, _ in
+    try files.publish(client.discovery)
+    let chat = await ChatController(root: root.path, executable: URL(fileURLWithPath: "/never-launch"),
+      openStore: { _ in barrier })
+    await chat.start()
+    await chat.selectModel(path: model.directory.path)
+    await chat.setMaxTokensOverride(31)
+    await chat.setTemperatureOverride(0.25)
+    let previewDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while await chat.effectiveSampling?.maxTokens != 31, ContinuousClock.now < previewDeadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await chat.effectiveSampling?.maxTokens == 31)
+    #expect(await chat.effectiveSampling?.temperature == 0.25)
+    #expect(await chat.effectiveSampling?.maxTokensSource == .request)
+    #expect(await chat.effectiveSampling?.temperatureSource == .request)
+    await chat.connect()
+    #expect(await chat.effectiveSampling?.maxTokensSource == .request)
+    #expect(await chat.maxTokens == 31)
+    #expect(await chat.temperature == 0.25)
+    await MainActor.run { chat.draft = "sampling snapshot" }
+    await barrier.arm()
+    let sending = Task { await chat.send() }
+    let saveDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while !(await barrier.isWaiting), ContinuousClock.now < saveDeadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await barrier.isWaiting)
+    await chat.setMaxTokensOverride(41)
+    await chat.setTemperatureOverride(0.5)
+    await chat.refreshEffectiveSampling()
+    #expect(await barrier.begunSampling?.maxTokens == 31)
+    #expect(await barrier.begunSampling?.temperature == 0.25)
+    await barrier.proceed()
+    await sending.value
+    while await chat.isWorking, ContinuousClock.now < saveDeadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await chat.live?.status == "stop")
+    #expect(await chat.effectiveSampling?.maxTokens == 41)
+    #expect(await chat.effectiveSampling?.temperature == 0.5)
+    await chat.setMaxTokensOverride(0)
+    await chat.refreshEffectiveSampling()
+    #expect(await chat.samplingPreviewError != nil)
+    #expect(await chat.maxTokens == 0)
+    #expect(await chat.temperature == 0.5)
+    await chat.restoreSamplingDefaults()
+    #expect(await chat.samplingPreviewError == nil)
+    #expect(await chat.effectiveSampling?.maxTokensSource == .product)
     #expect(await chat.shutdown())
   }
   withExtendedLifetime(ownership) {}

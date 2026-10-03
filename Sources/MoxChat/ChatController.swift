@@ -40,18 +40,29 @@ public struct LiveReply: Sendable {
   private var lastErrorCode: MoxError.Code?
   public var replySegments: [UUID: [String]] = [:]
   public var selectedID: UUID?
-  public var modelPath = ""
+  public var modelPath = "" {
+    didSet { if modelPath != oldValue { scheduleSamplingRefresh() } }
+  }
   public var draft = ""
   public var servicePhase = "disconnected"
   public var serviceState: ServiceState?
   public var live: LiveReply?
   public var error: String?
   public var storageAvailable = false
-  public var maxTokens = Sampling.defaultMaxTokens
-  public var temperature: Float = Sampling.defaultTemperature
-  public var maxTokensExplicit = false
-  public var temperatureExplicit = false
+  public private(set) var maxTokens = Sampling.defaultMaxTokens
+  public private(set) var temperature: Float = Sampling.defaultTemperature
+  public private(set) var maxTokensExplicit = false
+  public private(set) var temperatureExplicit = false
   public private(set) var effectiveSampling: EffectiveSampling?
+  public private(set) var samplingPreviewError: String?
+  private var samplingRefreshTask: Task<Void, Never>?
+  private var samplingReadID = UUID()
+  private struct SamplingPreview {
+    let id: UUID
+    let epoch: UUID
+    let path: String
+    let explicit: SamplingSettings
+  }
   public private(set) var isWorking = false
   public private(set) var isClosing = false
   public private(set) var stopWaitIsLong = false
@@ -104,22 +115,71 @@ public struct LiveReply: Sendable {
   public func setMaxTokensOverride(_ value: Int) {
     maxTokens = value
     maxTokensExplicit = true
-    effectiveSampling = nil
+    scheduleSamplingRefresh()
   }
   public func setTemperatureOverride(_ value: Float) {
     temperature = value
     temperatureExplicit = true
+    scheduleSamplingRefresh()
+  }
+  public func restoreSamplingDefaults() async {
+    maxTokensExplicit = false
+    temperatureExplicit = false
+    await refreshEffectiveSampling()
+  }
+  private var currentSamplingOverrides: SamplingSettings {
+    SamplingSettings(
+      maxTokens: maxTokensExplicit ? maxTokens : nil,
+      temperature: temperatureExplicit ? temperature : nil)
+  }
+  private func invalidateSamplingPreview() {
+    samplingRefreshTask?.cancel()
+    samplingRefreshTask = nil
+    samplingReadID = UUID()
     effectiveSampling = nil
+    samplingPreviewError = nil
+  }
+  private func samplingPreview() -> SamplingPreview {
+    SamplingPreview(id: samplingReadID, epoch: epoch, path: modelPath,
+      explicit: currentSamplingOverrides)
+  }
+  private func isCurrent(_ preview: SamplingPreview) -> Bool {
+    !isClosing && preview.id == samplingReadID && preview.epoch == epoch
+      && preview.path == modelPath && preview.explicit == currentSamplingOverrides
+  }
+  private func apply(_ effective: EffectiveSampling, for preview: SamplingPreview) {
+    guard isCurrent(preview) else { return }
+    effectiveSampling = effective
+    samplingPreviewError = nil
+    if !maxTokensExplicit { maxTokens = effective.maxTokens }
+    if !temperatureExplicit { temperature = effective.temperature }
+  }
+  private func scheduleSamplingRefresh() {
+    invalidateSamplingPreview()
+    guard !isClosing, !modelPath.isEmpty, let client = connection?.client else { return }
+    let preview = samplingPreview()
+    samplingRefreshTask = Task { [weak self] in
+      await self?.resolveSamplingPreview(preview, client: client)
+    }
   }
   public func refreshEffectiveSampling() async {
-    guard let client = connection?.client, !modelPath.isEmpty else { return }
+    invalidateSamplingPreview()
+    guard !isClosing, !modelPath.isEmpty, let client = connection?.client else { return }
+    await resolveSamplingPreview(samplingPreview(), client: client)
+  }
+  private func resolveSamplingPreview(_ preview: SamplingPreview, client: ServiceClient) async {
     do {
       let effective = try await client.resolveSampling(.init(
-        model: .init(kind: "localDirectory", path: modelPath)))
-      effectiveSampling = effective
-      if !maxTokensExplicit { maxTokens = effective.maxTokens }
-      if !temperatureExplicit { temperature = effective.temperature }
-    } catch { show(error) }
+        model: .init(kind: "localDirectory", path: preview.path), explicit: preview.explicit))
+      guard !Task.isCancelled else { return }
+      apply(effective, for: preview)
+    } catch {
+      guard !Task.isCancelled, isCurrent(preview) else { return }
+      let failure = (error as? MoxError)
+        ?? MoxError(.connectionLost, "无法读取有效参数；输入已保留，可重新连接后重试。")
+      samplingPreviewError = failure.description
+      ring.record(.init(stage: "sampling.preview", code: failure.code.rawValue))
+    }
   }
   public func start() async {
     BuildInfo.logStartup(component: "app")
@@ -140,6 +200,7 @@ public struct LiveReply: Sendable {
     guard !isWorking, !isClosing, servicePhase != "connecting" else { return }
     let nextEpoch = UUID()
     epoch = nextEpoch
+    invalidateSamplingPreview()
     servicePhase = "connecting"
     do {
       var value = try await Connection.open(root: root, executable: executable)
@@ -270,9 +331,8 @@ public struct LiveReply: Sendable {
     let targetID = selectedID
     let prompt = draft
     let path = modelPath
-    let explicit = SamplingSettings(
-      maxTokens: maxTokensExplicit ? maxTokens : nil,
-      temperature: temperatureExplicit ? temperature : nil)
+    let explicit = currentSamplingOverrides
+    let preview = samplingPreview()
     stopWaitIsLong = false
     error = nil
     let currentEpoch = epoch
@@ -281,9 +341,7 @@ public struct LiveReply: Sendable {
     do {
       let effective = try await connection.client.resolveSampling(.init(
         model: .init(kind: "localDirectory", path: path), explicit: explicit))
-      effectiveSampling = effective
-      if !maxTokensExplicit { maxTokens = effective.maxTokens }
-      if !temperatureExplicit { temperature = effective.temperature }
+      apply(effective, for: preview)
       let sampling = try effective.sampling()
       let cid: UUID
       if let targetID {
@@ -436,6 +494,7 @@ public struct LiveReply: Sendable {
     if epoch == reconnectEpoch { servicePhase = "unavailable" }
   }
   public func shutdown() async -> Bool {
+    invalidateSamplingPreview()
     monitor?.cancel()
     stop()
     let deadline = ContinuousClock.now.advanced(by: .seconds(ServiceTiming.shutdownSeconds))
@@ -451,6 +510,7 @@ public struct LiveReply: Sendable {
   }
   public func prepareToQuit() async -> Bool {
     isClosing = true
+    invalidateSamplingPreview()
     if isWorking { return true }
     guard let connection, connection.worker != nil else { return false }
     do {
@@ -463,7 +523,7 @@ public struct LiveReply: Sendable {
       return true
     }
   }
-  public func cancelQuit() { isClosing = false }
+  public func cancelQuit() { isClosing = false; scheduleSamplingRefresh() }
   public func forceShutdown() async {
     generation?.disconnect()
     if let worker = connection?.worker { await worker.forceStop() }

@@ -49,4 +49,4 @@ OpenAI SDK 的 base_url 使用 `$MOX_API_URL/v1`；Anthropic SDK base_url 使用
 
 当前经验证的工具产物为受管 `mlx-community/Qwen3-0.6B-4bit`，HF revision `73e3e38d981303bc594367cd910ea6eb48349da8`，还必须匹配权重与 tokenizer 摘要。仅 model_type、模型卡或导入目录不能获得能力。参数在官方 parser 完整解析、验证后由协议层分片；不是模型未完成的参数直接透传。
 
-官方 SDK 验证入口及固定版本见 [DEVELOPMENT](DEVELOPMENT.md)，实际运行范围见 [VERIFICATION](VERIFICATION.md)。
+官方 SDK 验证入口及固定版本见 [DEVELOPMENT](DEVELOPMENT.md)，实际运行范围见 [VALIDATION](VALIDATION.md)。

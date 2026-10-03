@@ -1,0 +1,58 @@
+name: Draft binary release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag (vVERSION), never created by this workflow'
+        required: true
+        type: string
+      acknowledge_adhoc:
+        description: 'Upload explicitly ad hoc, unnotarized experimental App to Draft only'
+        required: true
+        default: false
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: draft-release-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  authorize:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require reviewed default-branch workflow and explicit signing choice
+        env:
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TAG: ${{ inputs.tag }}
+          ACKNOWLEDGE: ${{ inputs.acknowledge_adhoc }}
+        run: |
+          [[ "$REF" == "refs/heads/$DEFAULT_BRANCH" ]]
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$ACKNOWLEDGE" == true ]]
+  build:
+    needs: authorize
+    uses: ./.github/workflows/build-binary.yml
+    with:
+      tag: ${{ inputs.tag }}
+      artifact: draft-binary
+  upload:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: binary-release
+    # No write-capable GITHUB_TOKEN; a separately scoped environment credential is required.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: draft-binary
+          path: .build/release
+      - name: Upload only to a matching Draft
+        env:
+          GH_TOKEN: ${{ secrets.DRAFT_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: python3 scripts/upload-draft-release.py --tag "$RELEASE_TAG" --directory .build/release

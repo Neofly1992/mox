@@ -2,7 +2,7 @@
 
 Mox 是面向 Apple Silicon 的本地语言模型工作台。原生 macOS App、CLI 和本地 HTTP API 共用同一模型库和 MLX 推理服务。
 
-**当前版本：0.1.0，源码原型。** 本仓库提供源码与本地构建方法，尚未发布签名、公证的安装包；人工体验验收及 macOS 15 真机验证仍待完成。自动测试与独立复核的范围见[验证记录](docs/VALIDATION.md)。
+**当前版本：0.1.0，源码原型。** 本仓库提供源码、本地构建与 GitHub Draft 二进制工作流；实验 App 为 ad hoc 签名、未公证，尚无正式签名安装包；人工体验验收及 macOS 15 真机验证仍待完成。自动测试与独立复核的范围见[验证记录](docs/VALIDATION.md)。
 
 ## 功能与限制
 
@@ -19,6 +19,10 @@ Mox 是面向 Apple Silicon 的本地语言模型工作台。原生 macOS App、
 运行目标是 **macOS 15 或更新版本、Apple Silicon**。当前验证机器为 macOS 27，不能据此声称 macOS 15 已验证。内存需求取决于模型大小、上下文及并发请求。
 
 源码构建需要完整 Xcode（Swift **6.3 或更新版本**）、Apple Metal Toolchain、Python 3 与 Git。首轮构建需要联网下载锁定的 Swift 依赖；若 Metal 工具未安装，请在 Xcode 中安装对应组件。Python 仅用于构建和验收脚本，运行 App 不需要 Python。Intel Mac 不在支持范围。
+
+## 下载实验 App
+
+从 [GitHub Releases](https://github.com/Neofly1992/mox/releases) 下载具体版本的 App ZIP 与对应 SHA-256 文件，按 [下载与验收说明](docs/RELEASE.md#下载与验收同一份附件) 校验并解压。Draft 仅供授权仓库用户验收，公开必须经用户批准；未看到二进制附件时请使用源码构建。实验包未通过 Apple 公证，Gatekeeper 可能阻止启动。完整 App 包含 worker、Metal 与依赖资源，不含模型权重；不要单独搬走其中的 CLI。
 
 ## 从源码构建
 

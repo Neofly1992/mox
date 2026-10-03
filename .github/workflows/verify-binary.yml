@@ -1,0 +1,12 @@
+name: Binary build verification
+on:
+  push:
+    branches: [codex/release-binaries]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    uses: ./.github/workflows/build-binary.yml
+    with:
+      artifact: binary-verification

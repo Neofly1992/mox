@@ -62,7 +62,21 @@ python3 -m venv .build/sdk-venv
 
 GitHub 工作流有跨平台纯仓库检查，以及 macos-26 arm64 / Xcode 26.6 的原生规则测试，运行同一脚本。GitHub 官方 [runner 表](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)与 [macos-26 镜像清单](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md)已核对架构和 Xcode 路径；规则 scheme 不编译或执行 MLX，不需要 GPU/Metal。标准 hosted macOS 不是本项目真实 MLX/GUI 验证环境。
 
-本地实际脚本执行与远端 Actions 成功是不同证据。工作流尚未推送/执行，不能写“CI 已绿”。真实 MLX/GUI 在有 Metal、登录桌面和测试模型的自有 Mac 显式运行；不假设仓库已配置 self-hosted runner 或私密漏洞入口。
+本地实际脚本执行与远端 Actions 成功是不同证据；检查具体提交对应的实际运行，不能从工作流定义推断“CI 已绿”。真实 MLX/GUI 在有 Metal、登录桌面和测试模型的自有 Mac 显式运行；不假设仓库已配置 self-hosted runner 或私密漏洞入口。
+
+## 二进制构建验证
+
+独立工作流 `Binary build verification` 使用同一 ARM64 runner，实际检查 Swift/Xcode/Metal、调用 `scripts/build.sh Release`，再执行 `python3 scripts/package-release.py`。脚本校验 App/worker 版本、架构、Release 身份、全部依赖 bundles/许可证、ad hoc 签名，并解压最终 ZIP 再验证。它只发布 Actions artifact，无标签、Release 或发布凭据需求。
+
+本地可执行：
+
+```sh
+python3 scripts/check-repository.py
+scripts/build.sh Release
+python3 scripts/package-release.py --output .build/release-check-new
+```
+
+输出目录须无同名附件；它只打包 App，不打包 CLI 裸文件或整个构建目录。发布故障/重试安全测试由仓库检查入口调用 `scripts/test-release.py`，使用隔离文件与 GitHub 替身，不写真实 Release。标签 Draft 上传与同一下载附件的真实 MLX/GUI 验收见 [RELEASE](RELEASE.md)。Metal 编译成功不等于 runner 可执行真实 GPU 推理；hosted runner 上不执行这些验收。
 
 ## 清理与改动流程
 

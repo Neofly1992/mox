@@ -22,4 +22,6 @@ Mox 0.1.0 是源码原型。自动测试、独立代码复核和用户体验验�
 
 ## CI 与发布的关系
 
-当前 CI 检查仓库一致性，并在 macOS 上运行规则与集成测试；不运行 Metal/MLX、GUI 或真实来源联网验证，不生成可分发 App，也不创建 GitHub Release。绿色 CI 仅代表工作流中实际执行的检查通过。源码 Release 与后续二进制分发流程见 [发布说明](RELEASE.md)。
+普通 CI 检查仓库一致性和规则/集成测试，不持有发布权限。独立二进制工作流实际检查 Xcode/Swift/Metal 并构建完整 App、生成 ZIP/SHA-256，检查解压后版本、ARM64、资源、worker 身份和 ad hoc 签名；不执行真实 MLX、GUI 或来源联网验收。发布安全回归使用 GitHub API 替身，不代表真实 Draft 已上传。
+
+手动标签工作流只上传 Draft 的 ad hoc 未公证实验包，不自动公开；正式 Developer ID 签名、公证及 Gatekeeper 安装验收未完成。远端构建结果以具体 Actions 运行和 commit 为准，定义工作流本身不是成功证据。最终真实 MLX 与 GUI 验收必须使用从 Release 下载的同一附件，记录 SHA-256；开发分支 artifact 或本地构建的结果不能替代。操作见 [发布说明](RELEASE.md)。

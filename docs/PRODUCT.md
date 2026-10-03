@@ -36,4 +36,4 @@ GUI 保存会话、消息与每次尝试。重试新增回答，保留旧结果�
 
 工具调用仅向经固定 revision、权重/tokenizer 摘要验证的受管 Qwen3 安装开放；导入引用或名称相似不代表工具可用。没有“所有 MLX 模型均兼容”的承诺，未知架构/预算无法估算时明确拒绝。
 
-本次交付源码与本地可构建 App；没有 Developer ID 签名、公证、Homebrew 分发或二进制 Release。部署目标 macOS 15 不等于已完成 macOS 15 真机验证；人工体验验收尚未完成。
+提供源码、本地可构建 App 和手动 GitHub Draft 二进制流程；实验 App 明确为 ad hoc 签名、未公证。公开前须下载实际 Release 附件并由用户验收，工作流不自动公开。没有 Developer ID 签名、公证或 Homebrew 分发。部署目标 macOS 15 不等于已完成 macOS 15 真机验证；人工体验验收尚未完成。

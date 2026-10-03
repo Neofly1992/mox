@@ -1,0 +1,52 @@
+name: Build binary (reusable)
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        default: ''
+      artifact:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
+      - name: Verify source selection
+        run: |
+          if [[ -n "$RELEASE_TAG" ]]; then
+            [[ "$RELEASE_TAG" == "v$(cat VERSION)" ]]
+            [[ "$(git rev-parse HEAD)" == "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" ]]
+          fi
+          python3 scripts/check-repository.py
+      - name: Verify Xcode, Swift and install Metal compiler if missing
+        run: |
+          scripts/check-toolchain.sh
+          if ! xcrun --toolchain Metal metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          scripts/check-toolchain.sh metal
+      - run: scripts/build.sh Release
+      - name: Package and verify extracted App
+        run: |
+          args=()
+          if [[ -n "$RELEASE_TAG" ]]; then args+=(--tag "$RELEASE_TAG"); fi
+          python3 scripts/package-release.py "${args[@]}"
+          git diff --exit-code -- Package.resolved Sources/MoxProtocol/BuildIdentity.swift Mox.xcodeproj/project.pbxproj
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact }}
+          path: .build/release/*
+          if-no-files-found: error
+          retention-days: 14

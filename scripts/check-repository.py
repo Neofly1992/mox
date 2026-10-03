@@ -48,4 +48,5 @@ for name in sorted(set(files)):
         errors.append(f'{name}: obsolete milestone entry or output path')
 if errors:
     raise SystemExit('\n'.join(errors))
+subprocess.run(['python3', 'scripts/test-release.py'], cwd=ROOT, check=True)
 print('Repository links, syntax, version, source identity and tracked-file hygiene passed (no MLX execution).')

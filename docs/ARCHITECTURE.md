@@ -84,4 +84,6 @@ Unified Logging 按 storage/download/runtime/server/gui/process 分类，安全�
 
 VERSION 是产品版本唯一来源；build fingerprint 标识生产源码/锁文件/构建输入，wire version 标识协议。Debug/Release 配置单独报告，App、CLI 与嵌入 worker 指纹一致。产物相对 Bundle 定位资源，不依赖构建机 PATH。
 
+二进制验证与普通 CI 分离，复用构建入口；Draft 发布检出明确标签 commit，校验 vVERSION，构建任务只读，上传凭据仅属于受限发布任务。App ZIP 仅包含完整 bundle，解压后验证版本、ARM64、worker 身份、资源与 ad hoc 签名；未公证实验包须从实际 Release 附件完成真机及人工验收后再公开。失败重试新增附件，不移动标签、修改公开版本或删除既有附件。
+
 规则、真实存储/HTTP、MLX、UI、SDK 与人工体验各自记录，不混用。测试只用隔离根和公开模型，故障注入测试正式纳入 Tests；历史评审材料从 Git 查阅。有效边界验证包括竞争启动、共享加载/校验、取消、慢消费者、提交不确定、重启、损坏/冲突、参数保存失败、隐私及模型引用所有权。具体入口见 DEVELOPMENT，验证范围见 VALIDATION。

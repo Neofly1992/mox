@@ -625,12 +625,24 @@ private final class CredentialProbe: ModelSourceFactory, @unchecked Sendable {
 @Test func httpDisconnectAndPreAggregationLimit() async throws {
   let model = try serviceModel()
   defer { try? FileManager.default.removeItem(at: model.directory) }
-  try await withService { client, runtime in
+  // Keep generation alive beyond the deadline so normal completion cannot
+  // accidentally satisfy the disconnect assertion on a slow CI runner.
+  try await withService(backend: ServiceBackend(count: 10000, delay: .milliseconds(10))) {
+    client, runtime in
     let generation = try client.generate(path: model.directory.path, request: serviceRequest())
     var iterator = generation.events.makeAsyncIterator()
-    _ = try await iterator.next()
+    _ = try #require(try await iterator.next())
     generation.disconnect()
-    try await Task.sleep(for: .milliseconds(300))
+    let disconnectDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    var terminal: EventFrame?
+    repeat {
+      terminal = try await client.requestState(generation.requestID).terminal
+      if terminal == nil { try await Task.sleep(for: .milliseconds(20)) }
+    } while terminal == nil && ContinuousClock.now < disconnectDeadline
+    let stopped = try #require(terminal, "Disconnect must stop the backend within the deadline")
+    if case .finished(.cancelled) = try stopped.event().payload {} else {
+      Issue.record("Disconnect must cancel the backend, not finish normally")
+    }
     #expect(await runtime.snapshot().activeLeases == 0)
     let response = try await Task.detached {
       let peer = try SocketPeer(client: client)

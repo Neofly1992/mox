@@ -8,10 +8,16 @@ on:
       artifact:
         type: string
         required: true
+    outputs:
+      artifact_id:
+        description: Immutable artifact ID from the successful build attempt
+        value: ${{ jobs.build.outputs.artifact_id }}
 permissions:
   contents: read
 jobs:
   build:
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     runs-on: macos-26
     timeout-minutes: 60
     env:
@@ -45,8 +51,9 @@ jobs:
           python3 scripts/package-release.py "${args[@]}"
           git diff --exit-code -- Package.resolved Sources/MoxProtocol/BuildIdentity.swift Mox.xcodeproj/project.pbxproj
       - uses: actions/upload-artifact@v4
+        id: upload
         with:
-          name: ${{ inputs.artifact }}
+          name: ${{ inputs.artifact }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: .build/release/*
           if-no-files-found: error
           retention-days: 14

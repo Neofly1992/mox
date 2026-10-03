@@ -20,7 +20,7 @@ GitHub 手动工作流要先存在于默认分支；开发阶段通过上述分�
 1. 审查源码与工作流、远端完整构建结果和验证边界；批准后合并默认分支，检查合并提交。必要时先手动运行 `Binary build verification`。
 2. 确认 `VERSION` 与预期版本一致，在审查过的提交创建并推送 `v0.1.0`（版本变化时以 VERSION 为准）。工作流不创建、移动或替换标签。
 3. 用户批准后配置受限发布凭据及 environment；运行 `Draft binary release`，选择默认分支，填写精确标签并勾选 ad hoc 确认。checkout 使用完整 `refs/tags/...`，HEAD 必须等于标签 commit，标签必须精确等于 `v` + VERSION；锁文件/源码身份变化时失败。
-4. 查看成功运行和 Draft 的附件。上传前再次确认远端标签 commit。现有公开 Release 或没有匹配 commit/signing 标记的 Draft 一律拒绝，不修改正文、删除或覆盖附件。失败后 rerun 会新增带 run ID/attempt 的附件；若同名附件已有 GitHub SHA-256 digest 且字节一致则跳过，否则失败。选择一个完整成功 attempt 的 ZIP、校验文件与 JSON，保留其他附件作为证据。
+4. 查看成功运行和 Draft 的附件。上传前再次确认远端标签 commit。现有公开 Release 或没有匹配 commit/signing 标记的 Draft 一律拒绝，不修改正文、删除或覆盖附件。构建 artifact 也按 run ID/attempt 唯一命名，上传任务按成功构建返回的不可变 artifact ID 下载；只重跑失败的上传任务时仍使用原构建，重跑全部时获得新构建。失败后 rerun 会新增带 run ID/attempt 的附件；若同名附件已有 GitHub SHA-256 digest 且字节一致则跳过，否则失败。选择一个完整成功 attempt 的 ZIP、校验文件与 JSON，保留其他附件作为证据。
 5. 用户从该 Draft 下载实际附件，按下节在同一份解压产物完成真实 MLX 与 GUI 验收。验收失败继续保留 Draft；需要改代码时用新版本标签，不移动旧标签。
 6. 用户记录所验附件名、SHA-256、commit、环境和结果，明确批准后才通过 GitHub UI 手动公开（保留实验包/未公证说明及必要限制）。上传期间禁止手动公开；GitHub 没有将“仍为 Draft”条件与附件上传原子绑定的 API。工作流不代填人工结论，不执行 publish。
 

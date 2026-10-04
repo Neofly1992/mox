@@ -97,7 +97,10 @@ def upload(api, tag, directory):
         if matches:
             digest = 'sha256:' + hashlib.sha256(data).hexdigest()
             require(len(matches) == 1 and matches[0].get('digest') == digest and matches[0]['size'] == len(data),
-                    f'Existing asset differs or has no verifiable digest: {asset.name}; rerun with a new attempt')
+                    f'Existing asset differs or has no verifiable digest: {asset.name}. '
+                    'Use Re-run all jobs or a new workflow dispatch to rebuild with new asset names; '
+                    'Re-run failed jobs reuses the same artifact and cannot resolve this conflict. '
+                    'Existing assets have been preserved.')
             continue
         url = release['upload_url'].split('{')[0] + '?name=' + urllib.parse.quote(asset.name, safe='')
         # Ensure credentials can only be sent to GitHub's upload host.
@@ -113,7 +116,7 @@ def main():
     args = parser.parse_args()
     token = os.environ.get('GH_TOKEN')
     repository = os.environ.get('GITHUB_REPOSITORY', '')
-    require(token, 'Missing environment-scoped DRAFT_RELEASE_TOKEN; no fallback to GITHUB_TOKEN')
+    require(token, 'Missing GH_TOKEN; the upload job must supply its short-lived GITHUB_TOKEN')
     require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository), 'Invalid repository')
     upload(GitHub(repository, token), args.tag, args.directory.resolve())
 

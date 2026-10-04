@@ -40,9 +40,9 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     environment: binary-release
-    # No write-capable GITHUB_TOKEN; a separately scoped environment credential is required.
+    # Only this environment-gated job receives a short-lived write token.
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,6 +54,6 @@ jobs:
           path: .build/release
       - name: Upload only to a matching Draft
         env:
-          GH_TOKEN: ${{ secrets.DRAFT_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: python3 scripts/upload-draft-release.py --tag "$RELEASE_TAG" --directory .build/release

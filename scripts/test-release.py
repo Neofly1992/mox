@@ -92,6 +92,33 @@ class ReleaseSafetyTests(unittest.TestCase):
         self.assertEqual(len(api.writes), 3)
         self.assertEqual(api.writes.count('app.zip'), 1)
 
+    def test_starter_asset_requires_new_build_and_preserves_original(self):
+        api = FakeGitHub()
+        starter = {'name': 'app.zip', 'state': 'starter', 'digest': None, 'size': 0}
+        api.assets.append(starter)
+        # Upload-only retries keep the immutable artifact and its original names.
+        for _ in range(2):
+            with self.assertRaisesRegex(SystemExit, 'Re-run all jobs'):
+                draft.upload(api, 'v0.1.0', self.directory)
+        self.assertEqual(api.writes, [])
+        self.assertEqual(api.assets, [starter])
+
+        # A full rebuild gets fresh names; no deletion or replacement is needed.
+        archive = self.directory / 'app.zip'
+        archive.rename(self.directory / 'app-new-build.zip')
+        (self.directory / 'app.sha256').unlink()
+        (self.directory / 'app.json').unlink()
+        self.manifest['archive'] = 'app-new-build.zip'
+        (self.directory / 'app-new-build.sha256').write_text(
+            f"{self.manifest['sha256']}  app-new-build.zip\n")
+        (self.directory / 'app-new-build.json').write_text(json.dumps(self.manifest))
+        draft.upload(api, 'v0.1.0', self.directory)
+        self.assertEqual(api.writes,
+            ['app-new-build.zip', 'app-new-build.sha256', 'app-new-build.json'])
+        self.assertEqual(api.assets[0], starter)
+        draft.upload(api, 'v0.1.0', self.directory)
+        self.assertEqual(len(api.writes), 3)
+
     def test_becoming_public_stops_remaining_uploads(self):
         class PublishedGitHub(FakeGitHub):
             def request(self, path, **kwargs):

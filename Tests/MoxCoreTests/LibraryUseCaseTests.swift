@@ -72,6 +72,10 @@ private actor IdentityRepository: ModelLibraryPersistence {
   }
 }
 private actor LibraryRuntimeProbe: ModelRuntime {
+  func resourceBudgetBytes() -> Int { 512 * 1024 * 1024 }
+  func assess(model: LocalModel, maxTokens: Int) -> ResourceAssessment {
+    model.resources.assessment(maxTokens: maxTokens, budgetBytes: resourceBudgetBytes())
+  }
   var pinned = false
   var rejectUnload = false
   var loadEntered = false
@@ -209,4 +213,39 @@ private final class LibrarySourceProbe: ModelSourceFactory, @unchecked Sendable 
   try await library.restoreRuntimeSettings()
   #expect(await runtime.pinned)
   #expect(await repository.catalogReads == 1)
+}
+
+private actor LocalInspectionProbe {
+  var entered = false
+  var stopped = false
+  func inspect(_ path: String) async throws -> LocalModel {
+    entered = true
+    defer { stopped = true }
+    do { try await Task.sleep(for: .seconds(60)) } catch {
+      // Simulate a filesystem error delivered after the cancellation signal.
+      throw MoxError(.invalidModel, "Read error raced with cancellation.")
+    }
+    return try LocalModel(path: path)
+  }
+}
+@Test(arguments: [false, true])
+func previewInspectionLeavesActorResponsiveAndStopsOnCancellationOrShutdown(shutdown: Bool) async throws {
+  let model = try fixture()
+  defer { try? FileManager.default.removeItem(at: model.directory) }
+  let probe = LocalInspectionProbe()
+  let library = ModelLibraryService(downloads: nil, runtime: LibraryRuntimeProbe(),
+    inspectLocalFiles: { try await probe.inspect($0) })
+  let preview = Task { try await library.assessResources(.directory(model.directory.path)) }
+  let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+  while !(await probe.entered), ContinuousClock.now < deadline { await Task.yield() }
+  #expect(await probe.entered)
+  let sampling = try await library.resolveSampling(.directory(model.directory.path))
+  #expect(sampling.maxTokens > 0)
+  if shutdown { await library.shutdown() } else { preview.cancel() }
+  await #expect(throws: CancellationError.self) { try await preview.value }
+  #expect(await probe.stopped)
+  await library.shutdown()
+  await #expect(throws: MoxError.self) {
+    _ = try await library.assessResources(.directory(model.directory.path))
+  }
 }

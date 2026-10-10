@@ -8,7 +8,7 @@ func fixture() throws -> LocalModel {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent("Mox 测试 \(UUID())")
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   let config =
-    #"{"model_type":"qwen2","hidden_size":16,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"max_position_embeddings":32768,"vocab_size":100}"#
+    #"{"model_type":"qwen2","hidden_size":16,"intermediate_size":64,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"max_position_embeddings":32768,"vocab_size":100}"#
   try Data(config.utf8).write(to: root.appendingPathComponent("config.json"))
   for file in ["tokenizer_config.json", "tokenizer.json"] {
     try Data("{}".utf8).write(to: root.appendingPathComponent(file))
@@ -159,7 +159,7 @@ func runtime(_ backend: ProbeBackend, queue: Int = 8, timeout: Duration = .secon
     try? FileManager.default.removeItem(at: second.directory)
   }
   let core = RuntimeCoordinator(backend: ProbeBackend(),
-    policy: .init(budgetBytes: first.weightBytes * 2))
+    policy: .init(budgetBytes: first.resources.assessment(maxTokens: 1, budgetBytes: Int.max).peakBytes!))
   try await core.load(model: first)
   await core.setPinned(modelID: first.id, true)
   await #expect(throws: MoxError.self) { try await core.load(model: second) }
@@ -484,4 +484,30 @@ func runtime(_ backend: ProbeBackend, queue: Int = 8, timeout: Duration = .secon
   try reference.validateUnchanged()
   try FileManager.default.moveItem(at: tokenizer, to: model.directory.appendingPathComponent("renamed.json"))
   #expect(throws: MoxError.self) { try reference.validateUnchanged() }
+}
+
+@Test func criticalPressureCleansResidentsAfterQueuedCancellation() async throws {
+  let model = try fixture()
+  defer { try? FileManager.default.removeItem(at: model.directory) }
+  let core = runtime(ProbeBackend(loadDelay: .zero, tokenDelay: .milliseconds(10), count: 100))
+  let active = try await core.generate(model: model, request: request())
+  for await event in active.events {
+    if case .contentDelta = event.payload { break }
+  }
+  var queued: [GenerationHandle] = []
+  for _ in 0..<8 { queued.append(try await core.generate(model: model, request: request())) }
+  let queuedDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+  while await core.snapshot().queued < queued.count, ContinuousClock.now < queuedDeadline { await Task.yield() }
+  #expect(await core.snapshot().queued == queued.count)
+  await core.updatePressure(.critical)
+  await active.waitUntilStopped()
+  for handle in queued { await handle.waitUntilStopped() }
+  let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+  while await core.snapshot().reservedBytes != 0, ContinuousClock.now < deadline { await Task.yield() }
+  let state = await core.snapshot()
+  #expect(state.activeLeases == 0)
+  #expect(state.residentModels == 0)
+  #expect(state.reservedBytes == 0)
+  #expect(state.queued == 0)
+  await core.shutdown()
 }

@@ -1,4 +1,5 @@
 import Foundation
+import MoxBootstrap
 import MoxCore
 import MoxDomain
 @testable import MoxMLX
@@ -20,7 +21,7 @@ func realLocalInference() async throws {
   let budget = try MLXBackend.recommendedBudget()
   let runtime = RuntimeCoordinator(
     backend: MLXBackend(memoryLimit: budget), policy: .init(budgetBytes: budget),
-    availableMemory: { SystemMemory.availableBytes() })
+    availableMemory: { SystemMemory.reclaimablePageBytes() })
   let sampling = try Sampling(maxTokens: 24, temperature: 0)
   var session = ChatSession()
   var firstReply = ""

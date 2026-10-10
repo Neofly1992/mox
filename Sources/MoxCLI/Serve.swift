@@ -92,7 +92,28 @@ struct Serve: AsyncParsableCommand {
       policy: .init(
         budgetBytes: effectiveBudget, queueCapacity: queueCapacity,
         queueTimeout: .seconds(queueTimeoutSeconds)),
-      availableMemory: { SystemMemory.availableBytes() })
+      availableMemory: { SystemMemory.reclaimablePageBytes() })
+    let pressureEvents = AsyncStream<MemoryPressureLevel>.makeStream(
+      bufferingPolicy: .bufferingNewest(16))
+    let pressureConsumer = Task {
+      for await level in pressureEvents.stream { await runtime.updatePressure(level) }
+    }
+    let pressureSource = DispatchSource.makeMemoryPressureSource(
+      eventMask: [.normal, .warning, .critical], queue: .global())
+    pressureSource.setEventHandler {
+      let event = pressureSource.data
+      let level: MemoryPressureLevel =
+        event.contains(.critical)
+        ? .critical
+        : event.contains(.warning) ? .warning : .normal
+      pressureEvents.continuation.yield(level)
+    }
+    pressureSource.resume()
+    defer {
+      pressureSource.cancel()
+      pressureEvents.continuation.finish()
+      pressureConsumer.cancel()
+    }
     let libraryStore = try await RuntimeStore.open(root: files.root)
     let artifacts = try ArtifactStore(root: files.root.appendingPathComponent("models"))
     let downloads = try await DownloadManager.open(

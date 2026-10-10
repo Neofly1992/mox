@@ -110,6 +110,21 @@ public actor DownloadManager {
     verifications[id] = Verification(task: task, wait: wait)
     return try await wait.value()
   }
+  /// Full committed-artifact inspection without updating recovery/index state.
+  func inspectInstallationReadOnly(_ item: ModelInstallation) async throws {
+    guard let manifest = item.manifest else { return }
+    let directory = try artifacts.installedDirectory(for: manifest.origin)
+    let expectedPath = manifest.origin.variant.isEmpty
+      ? directory.path : directory.appendingPathComponent(manifest.origin.variant).path
+    guard item.path == expectedPath else {
+      throw MoxError(.invalidModel, "Managed model path does not match its artifact identity.")
+    }
+    let actual = try await verifier.inspect(manifest.origin, in: artifacts)
+    try Task.checkCancellation()
+    guard actual == manifest else {
+      throw MoxError(.invalidModel, "Installed manifest differs from its index.")
+    }
+  }
   private func performVerification(_ id: UUID, manifest: ArtifactManifest) async throws
     -> ModelInstallation
   {

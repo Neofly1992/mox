@@ -53,6 +53,7 @@ public struct LiveReply: Sendable {
   public private(set) var temperature: Float = Sampling.defaultTemperature
   public private(set) var maxTokensExplicit = false
   public private(set) var temperatureExplicit = false
+  public private(set) var resourceAssessment: ResourceAssessment?
   public private(set) var effectiveSampling: EffectiveSampling?
   public private(set) var samplingPreviewError: String?
   private var samplingRefreshTask: Task<Void, Never>?
@@ -137,6 +138,7 @@ public struct LiveReply: Sendable {
     samplingRefreshTask = nil
     samplingReadID = UUID()
     effectiveSampling = nil
+    resourceAssessment = nil
     samplingPreviewError = nil
   }
   private func samplingPreview() -> SamplingPreview {
@@ -173,6 +175,11 @@ public struct LiveReply: Sendable {
         model: .init(kind: "localDirectory", path: preview.path), explicit: preview.explicit))
       guard !Task.isCancelled else { return }
       apply(effective, for: preview)
+      let resources = try? await client.assessResources(
+        .init(
+          model: .init(kind: "localDirectory", path: preview.path), explicit: preview.explicit))
+      guard !Task.isCancelled, isCurrent(preview) else { return }
+      resourceAssessment = resources
     } catch {
       guard !Task.isCancelled, isCurrent(preview) else { return }
       let failure = (error as? MoxError)
@@ -523,7 +530,10 @@ public struct LiveReply: Sendable {
       return true
     }
   }
-  public func cancelQuit() { isClosing = false; scheduleSamplingRefresh() }
+  public func cancelQuit() {
+    isClosing = false
+    scheduleSamplingRefresh()
+  }
   public func forceShutdown() async {
     generation?.disconnect()
     if let worker = connection?.worker { await worker.forceStop() }
@@ -625,16 +635,30 @@ public struct LiveReply: Sendable {
       let serviceEvents: [DiagnosticEvent]
       let serviceDiagnosticsStatus: String
       let workerOutput: WorkerOutputSnapshot?
+      let doctor: DoctorReport
+      let resources: ResourceAssessment?
+      let backendMemory: BackendMemorySnapshot?
+      let memoryPressure: MemoryPressureLevel?
     }
     let serviceEvents: [DiagnosticEvent]
     let diagnosticsStatus: String
     if let client = connection?.client {
-      do { serviceEvents = try await client.diagnosticEvents(); diagnosticsStatus = "available" }
-      catch {
-        serviceEvents = []; diagnosticsStatus = "unavailable"
+      do {
+        serviceEvents = try await client.diagnosticEvents()
+        diagnosticsStatus = "available"
+      } catch {
+        serviceEvents = []
+        diagnosticsStatus = "unavailable"
         self.error = "服务诊断不可取得；已保留本机诊断，恢复连接后可重新导出。"
       }
-    } else { serviceEvents = []; diagnosticsStatus = "disconnected" }
+    } else {
+      serviceEvents = []
+      diagnosticsStatus = "disconnected"
+    }
+    let doctor = await DoctorRunner.run(
+      DoctorChecks.local(
+        root: root, worker: executable,
+        appBundle: Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.bundleURL : nil))
     return try Wire.encode(
       Report(
         configuration: BuildInfo.configuration, buildID: Wire.buildID,
@@ -648,7 +672,9 @@ public struct LiveReply: Sendable {
         runtimeQueueTimeoutSeconds: serviceState?.queueTimeoutSeconds,
         events: ring.events,
         serviceEvents: serviceEvents, serviceDiagnosticsStatus: diagnosticsStatus,
-        workerOutput: connection?.worker?.outputSnapshot))
+        workerOutput: connection?.worker?.outputSnapshot, doctor: doctor,
+        resources: resourceAssessment, backendMemory: serviceState?.backendMemory,
+        memoryPressure: serviceState?.memoryPressure))
   }
 }
 

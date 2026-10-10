@@ -40,7 +40,16 @@ public struct HuggingFaceSource: ResolvedModelSource {
     try ModelAssetSelection.validate(files, variant: variant)
     return manifest
   }
-  public func download(_ file: ArtifactFile, manifest: ArtifactManifest, to root: URL) async throws {
+  public func resourceConfiguration(_ manifest: ArtifactManifest) async throws -> Data? {
+    let name =
+      manifest.origin.variant.isEmpty ? "config.json" : manifest.origin.variant + "/config.json"
+    guard let file = manifest.files.first(where: { $0.path == name }), file.bytes <= 8 * 1024 * 1024
+    else { return nil }
+    return try await transport.json(
+      path: "\(manifest.origin.repository)/resolve/\(manifest.origin.revision)/\(file.path)")
+  }
+  public func download(_ file: ArtifactFile, manifest: ArtifactManifest, to root: URL) async throws
+  {
     try ArtifactValidation.validate(manifest)
     guard manifest.files.contains(file) else { throw MoxError(.invalidParameters, "File is not part of the fixed snapshot.") }
     let request = try transport.request(path: "\(manifest.origin.repository)/resolve/\(manifest.origin.revision)/\(file.path)")

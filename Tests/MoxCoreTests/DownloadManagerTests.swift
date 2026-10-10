@@ -6,8 +6,9 @@ import Testing
 
 private actor MemoryLibrary: SnapshotTestPersistence {
   var value = ModelLibrarySnapshot()
+  var writes = 0
   func readLibrary() -> ModelLibrarySnapshot { value }
-  func saveLibrary(_ snapshot: ModelLibrarySnapshot) { value = snapshot }
+  func saveLibrary(_ snapshot: ModelLibrarySnapshot) { writes += 1; value = snapshot }
 }
 private actor SaveGate {
   var entered = false
@@ -467,5 +468,49 @@ private actor TerminalSaveFailureLibrary: SnapshotTestPersistence {
   }
   #expect(try await manager.operation(id).errorCode == "sourceFailed")
   #expect(await db.readLibrary().operations.first?.phase == .failed)
+  await manager.shutdown()
+}
+
+@Test(arguments: ["manifest", "extra", "symlink"])
+func readOnlyInspectionValidatesCommittedLayoutWithoutIndexWrites(damage: String) async throws {
+  let model = try fixture()
+  defer { try? FileManager.default.removeItem(at: model.directory) }
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let artifacts = try ArtifactStore(root: root)
+  let operation = UUID()
+  let staging = try artifacts.stagingDirectory(for: operation)
+  let origin = ArtifactOrigin(registryID: UUID(), repository: "fixture/doctor",
+    revision: String(repeating: "a", count: 40))
+  let files = try FileManager.default.contentsOfDirectory(at: model.directory, includingPropertiesForKeys: nil)
+  let manifest = try ArtifactManifest(origin: origin, files: files.map { url in
+    let data = try Data(contentsOf: url)
+    try data.write(to: staging.appendingPathComponent(url.lastPathComponent))
+    return ArtifactFile(path: url.lastPathComponent, bytes: Int64(data.count),
+      digest: .sha256(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()))
+  })
+  _ = try artifacts.commit(operationID: operation, manifest: manifest)
+  let directory = try artifacts.installedDirectory(for: origin)
+  let item = ModelInstallation(path: directory.path, manifest: manifest, alias: "doctor")
+  let db = MemoryLibrary()
+  try await db.commit(.init(installations: [item]))
+  let manager = DownloadManager(persistence: db, artifacts: artifacts)
+  let before = await db.readLibrary()
+  let writesBefore = await db.writes
+  try await manager.inspectInstallationReadOnly(item)
+  #expect(await db.writes == writesBefore)
+  switch damage {
+  case "manifest": try Data("{}".utf8).write(to: directory.appendingPathComponent("mox-manifest.json"))
+  case "extra": try Data("unexpected".utf8).write(to: directory.appendingPathComponent("extra.json"))
+  default: try FileManager.default.createSymbolicLink(atPath: directory.appendingPathComponent("extra-link").path,
+    withDestinationPath: model.directory.path)
+  }
+  await #expect(throws: (any Error).self) { try await manager.inspectInstallationReadOnly(item) }
+  let after = await db.readLibrary()
+  #expect(after.installations == before.installations)
+  #expect(after.operations == before.operations)
+  #expect(after.configuration == before.configuration)
+  #expect(await db.writes == writesBefore)
+  #expect(FileManager.default.fileExists(atPath: directory.path))
   await manager.shutdown()
 }

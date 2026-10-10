@@ -278,6 +278,9 @@ public struct ModelState: Codable, Sendable {
   }
 }
 public struct ServiceState: Codable, Sendable {
+  public var memoryPressure: MemoryPressureLevel = .normal
+  public var admissionPaused: Bool = false
+  public var backendMemory: BackendMemorySnapshot?
   public var instanceID: UUID
   public var revision: UInt64
   public var serviceState: String

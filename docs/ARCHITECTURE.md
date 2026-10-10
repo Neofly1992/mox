@@ -54,7 +54,7 @@ HF 使用锁定官方 swift-huggingface 的元数据、分页、认证接口，�
 
 恢复句柄是优化，不保证任意崩溃后 byte resume。已完成文件复用，失效 partial 明确重下；内容 digest、Git blob ID、opaque ETag 分开处理。缺文件/摘要不符/manifest 损坏标记不可用，保留可移除记录。
 
-本地引用规范化路径、检查必要资产与有界 safetensors header/index；加载前后检查资产大小/修改时间，不声称能防止其他进程改写；同长度内容修改且时间戳被保留或文件系统时间分辨率不足时，元数据检查可能无法发现。受管安装的完整性校验另用 manifest 内容摘要。移除不删除原文件；模型使用/准备和删除按 Core 门闩协调。
+本地引用规范化路径（本地资产链接解析到目标，权重字节与修改时间取目标普通文件），读取前拒绝特殊文件；打开采用非阻塞及 no-follow，再按描述符核对普通文件类型和身份，分块读取检查取消。检查必要资产与有界 safetensors header/index；加载前后检查资产大小/修改时间，不声称能防止其他进程改写；同长度内容修改且时间戳被保留或文件系统时间分辨率不足时，元数据检查可能无法发现。受管安装的完整性校验另用 manifest 内容摘要。移除不删除原文件；模型使用/准备和删除按 Core 门闩协调。
 
 ## 4. Runtime 与 MLX 边界
 
@@ -87,3 +87,17 @@ VERSION 是产品版本唯一来源；build fingerprint 标识生产源码/锁�
 二进制验证与普通 CI 分离，复用构建入口；Draft 发布检出明确标签 commit，校验 vVERSION，构建任务只读，仅上传任务使用 environment 保护下的短期 GITHUB_TOKEN contents: write，不维护额外 PAT。App ZIP 仅包含完整 bundle，解压后验证版本、ARM64、worker 身份、资源与 ad hoc 签名；未公证实验包须从实际 Release 附件完成真机及人工验收后再公开。失败重试新增附件，不移动标签、修改公开版本或删除既有附件。
 
 规则、真实存储/HTTP、MLX、UI、SDK 与人工体验各自记录，不混用。测试只用隔离根和公开模型，故障注入测试正式纳入 Tests；历史评审材料从 Git 查阅。有效边界验证包括竞争启动、共享加载/校验、取消、慢消费者、提交不确定、重启、损坏/冲突、参数保存失败、隐私及模型引用所有权。具体入口见 DEVELOPMENT，验证范围见 VALIDATION。
+
+## 7. 诊断、估算与压力
+
+- Domain 的 ResourceAssessment、ResourceStatus、MemoryPressureLevel 和 BackendMemorySnapshot 是共享值。Core ModelResources 拥有稠密 attention 包络与判定，LocalModel 与远端小型 config 共用该规则；没有第二套预算器。ModelRuntime 暴露预算与 advisory assessment，RuntimeCoordinator 独占 reservation、门闩及压力状态。
+- 权重基线为必要 safetensors 文件字节（含少量 header），加载多预留一份权重副本；KV 按层数 × K/V 两份 × KV heads × head dimension × Float32 四字节 × token 包络，工作区根据 hidden/intermediate/vocab 等实际维度预留投影与 MLP 临时缓冲，沿用有界 128-token prefill 包络与 64 MiB 下限；锁定 Gemma2 使用显式 attention score 矩阵，额外按 8 份 Float32 score buffer 保守预留。head_dim/KV heads 的默认与使用方式按锁定官方各模型配置核对，Qwen2/Phi3 不采用其后端忽略的 head_dim 字段，缺少必需维度不猜测。模型 context 与输入 8192/output 8192 的既有上限仍约束请求（Domain GenerationLimits 为唯一 token 上限定值，Core 与后端复用）。只有已核验稠密布局名单可估算；共享/滑动 attention 按完整 KV 保守计算，hybrid/MoE 等未知架构拒绝，CPU、tokenizer、分配器与加载转换成本有不确定性。输出已占满 context 时在加载前拒绝。
+- MLX backend 报告 configured/device ceiling，Coordinator 将注入的 policy 上限收紧到该值，直接 Core 嵌入也不能提高原生安全上限；configured ceiling 继续取物理 RAM 的 65% 与 Metal recommendedMaxWorkingSetSize 的 80% 中较小者（系统保留至少 35%）；超过预算拒绝，使用超过预算的 80% 标记紧张。macOS free+inactive 页只是可回收页观测，不是“总内存减使用量”或进程可分配保证；每次门闩准入及确认卸载后重新采样，并留 20% 页余量。采样失败不冒充无限容量，仍执行 configured ceiling 与压力准入。`os_proc_available_memory` 在锁定 SDK 标注 API_UNAVAILABLE(macos)，不使用。
+- Runtime 在门闩内原子检查/发布 reservation，再悬挂到后端；显式加载也计入官方 one-token warmup 的 KV/工作区包络，warmup 模板 token 超限会明确失败。队列保持既有容量/期限，同一模型复用驻留，串行高峰无需为等待请求分配 KV。预览包括当前 reservation，可能保守计入正在执行的请求，不提前淘汰模型；实际门闩可按 LRU 回收 idle/unpinned。固定与活动模型仍受原有生命周期保护。
+- composition root 订阅 DispatchSourceMemoryPressure，并通过有界顺序事件流注入 Coordinator；规则测试直接注入信号。warning 拒绝新工作，critical 取消所有生成及门闩等待；加载不能保证即时停止，仍等待官方后端返回/同步。压力回收也持有同一门闩，卸载返回后才扣除权重；固定模型保留。normal 恢复延迟 5 秒，新的 warning/critical 取消恢复计时。退出取消恢复任务，并等待压力回收与后端停止。
+- MoxMLX 通过锁定 mlx-swift 0.31.6 的 Memory.snapshot() 提供 active、cache、peak active（进程启动以来）字节。active 是活跃 MLXArray，cache 是可复用缓冲池，两者合计为 MLX 分配；不包含整个进程/系统的全部内存，peak 不是单请求独占峰值。不改变锁定依赖。
+- Protocol 的 DoctorResult/Report 保存稳定检查 ID、状态、原因/建议和已有脱敏 DiagnosticEvent。Client DoctorRunner 组织小型 ordered async checks；本地平台/产物/文件检查由 composition 注入 DoctorCheck，业务资产检查归 ModelLibraryService；托管资产复用 DownloadManager 持有的 CommittedArtifactVerifier，检查磁盘 manifest/索引、身份、摘要与完整目录布局，不更新恢复状态；source IO 归现有 Sources。交互层不复制业务检查，不引入插件框架。
+- ServiceFiles 的只读构造不创建目录、不获取写者锁。目录检查分别验证安全所有权/模式和实际读写遍历权限，默认检查不试写。doctor 默认读取已有 discovery 并用现有 authenticated identity 核对实例/版本/数据根，不走 Connection.open 的自动启动。App/worker 的版本和嵌入 fingerprint 一起检查；Metal 资源按 bundle 相对路径检查，不读取开发 PATH。
+- 显式扩展检查使用独立服务端 UUID 句柄（最多 4），任务由 Service 拥有；客户端期限/取消通过显式 cancel 请求等待检查停止，取消先到时保留有界 tombstone（256）阻止迟到工作。关闭服务取消并等待这些任务。资源预览、生成准备与显式加载的本地文件检查由 ModelLibraryService 持有 detached 任务（最多 4），避免占用业务 actor；取消传播到检查任务，退出取消并等待它们，使用门闩直到检查结束才释放。取消、busy、shutdown 不映射为未知估算。discovery 在打开前拒绝特殊文件，采用非阻塞打开并再次 fstat 核对类型、身份及权限；不依赖任务组取消去中断系统调用。文件摘要循环可取消、无数据库状态写入；来源检查使用固定 revision 元数据解析，绝不 fetch 权重。部分失败不终止后续检查，异常只记录 allowlisted domain/code 与阶段。未确认停止不会声明已释放。
+
+API 依据：[Apple Dispatch memory pressure](https://developer.apple.com/documentation/dispatch/dispatchsourcememorypressure)、[Apple os_proc_available_memory](https://developer.apple.com/documentation/os/os_proc_available_memory)、[锁定 MLX Memory 源码](https://github.com/ml-explore/mlx-swift/blob/0.31.6/Source/MLX/Memory.swift)。部署目标仍为 macOS 15；该目标不是全版本真机验证证据。

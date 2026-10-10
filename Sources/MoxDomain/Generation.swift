@@ -59,6 +59,11 @@ public struct Message: Sendable, Equatable {
     }.joined()
   }
 }
+/// Product text-generation bounds; tokenizer validation and resource admission share them.
+public enum GenerationLimits {
+  public static let maximumInputTokens = 8192
+  public static let maximumOutputTokens = 8192
+}
 public struct Sampling: Sendable, Equatable {
   public static let defaultMaxTokens = 2048
   public static let defaultTemperature: Float = 0.6
@@ -68,7 +73,7 @@ public struct Sampling: Sendable, Equatable {
   public let topP: Float
   public init(maxTokens: Int = Self.defaultMaxTokens,
     temperature: Float = Self.defaultTemperature, topP: Float = Self.defaultTopP) throws {
-    guard (1...8192).contains(maxTokens), temperature.isFinite, (0...2).contains(temperature),
+    guard (1...GenerationLimits.maximumOutputTokens).contains(maxTokens), temperature.isFinite, (0...2).contains(temperature),
       topP.isFinite, topP > 0, topP <= 1
     else {
       throw MoxError(

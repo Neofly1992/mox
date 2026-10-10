@@ -51,12 +51,15 @@ public struct ArtifactManifest: Codable, Sendable, Equatable {
 
 public struct ModelDownloadPlan: Codable, Sendable {
   public let manifest: ArtifactManifest
+  public let resources: ResourceAssessment?
   public let totalBytes: Int64
   public let peakBytes: Int64
   public let availableBytes: Int64?
-  public init(manifest: ArtifactManifest, totalBytes: Int64, peakBytes: Int64,
-    availableBytes: Int64?
+  public init(
+    manifest: ArtifactManifest, totalBytes: Int64, peakBytes: Int64,
+    availableBytes: Int64?, resources: ResourceAssessment? = nil
   ) {
+    self.resources = resources
     self.manifest = manifest
     self.totalBytes = totalBytes
     self.peakBytes = peakBytes
@@ -65,13 +68,17 @@ public struct ModelDownloadPlan: Codable, Sendable {
 }
 public struct ModelDownloadPlanSummary: Codable, Sendable {
   public let origin: ArtifactOrigin
+  public let resources: ResourceAssessment?
   public let fileCount: Int
   public let totalBytes: Int64
   public let peakBytes: Int64
   public let availableBytes: Int64?
   public init(_ plan: ModelDownloadPlan) {
-    origin = plan.manifest.origin; fileCount = plan.manifest.files.count
-    totalBytes = plan.totalBytes; peakBytes = plan.peakBytes
+    resources = plan.resources
+    origin = plan.manifest.origin
+    fileCount = plan.manifest.files.count
+    totalBytes = plan.totalBytes
+    peakBytes = plan.peakBytes
     availableBytes = plan.availableBytes
   }
 }

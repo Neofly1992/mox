@@ -10,6 +10,7 @@ public struct LocalModel: Sendable, Hashable {
   public let contextSize: Int
   public let kvBytesPerToken: Int
   public let workspaceBytes: Int
+  public let resources: ModelResources
   private let fingerprint: String
 
   public init(path: String) throws {
@@ -22,58 +23,26 @@ public struct LocalModel: Sendable, Hashable {
       throw MoxError(.invalidModel, "Model directory does not exist.")
     }
     func json(_ file: String) throws -> [String: Any] {
-      let url = directory.appendingPathComponent(file)
-      guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-        size <= 32 * 1024 * 1024,
-        let data = try? Data(contentsOf: url),
-        let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-      else {
+      let url = directory.appendingPathComponent(file).resolvingSymlinksInPath()
+      let asset = try ModelAssetFile(url, maximumBytes: 32 * 1024 * 1024)
+      let data = try asset.read(count: asset.size)
+      guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         throw MoxError(.invalidModel, "Missing or invalid \(file).")
       }
       return object
     }
     let config = try json("config.json")
     _ = try json("tokenizer_config.json")
-    guard
-      FileManager.default.isReadableFile(
-        atPath: directory.appendingPathComponent("tokenizer.json").path)
-    else { throw MoxError(.invalidModel, "Missing tokenizer.json.") }
-    guard
-      let tokenizerSize = try? directory.appendingPathComponent("tokenizer.json").resourceValues(
-        forKeys: [.fileSizeKey]).fileSize,
-      tokenizerSize <= 64 * 1024 * 1024
-    else {
-      throw MoxError(.resourceLimit, "tokenizer.json exceeds the 64 MiB asset metadata budget.")
-    }
-    // These dense attention layouts have a defensible KV/working-space estimate.
-    // Other factory architectures need their own estimator before admission.
-    guard let type = config["model_type"] as? String,
-      ["qwen2", "qwen3", "llama", "gemma", "gemma2", "gemma3_text", "mistral", "phi3"].contains(
-        type)
-    else {
-      throw MoxError(.invalidModel, "Model architecture has no verified resource estimate.")
-    }
-    modelType = type
-    func positive(_ key: String, fallback: Int? = nil) throws -> Int {
-      guard let value = (config[key] as? Int) ?? fallback, value > 0, value <= 10_000_000 else {
-        throw MoxError(.invalidModel, "Missing or invalid model dimension: \(key).")
-      }
-      return value
-    }
-    let layers = try positive("num_hidden_layers")
-    let hidden = try positive("hidden_size")
-    let heads = try positive("num_attention_heads")
-    let kvHeads = try positive("num_key_value_heads", fallback: heads)
-    let headDim = try positive("head_dim", fallback: hidden / heads)
-    let context = try positive("max_position_embeddings")
-    let vocab = try positive("vocab_size")
+    _ = try ModelAssetFile(directory.appendingPathComponent("tokenizer.json").resolvingSymlinksInPath(),
+      maximumBytes: 64 * 1024 * 1024)
     let files = try FileManager.default.contentsOfDirectory(
       at: directory, includingPropertiesForKeys: [.fileSizeKey])
     let weights = files.filter { $0.pathExtension == "safetensors" }
     guard !weights.isEmpty else { throw MoxError(.invalidModel, "Missing safetensors weights.") }
     var tensorFiles: [String: String] = [:]
     for file in weights {
-      for name in try WeightInspection.names(in: file) {
+      try Task.checkCancellation()
+      for name in try WeightInspection.names(in: file.resolvingSymlinksInPath()) {
         guard tensorFiles.updateValue(file.lastPathComponent, forKey: name) == nil else {
           throw MoxError(.invalidModel, "Duplicate weight tensor across shards.")
         }
@@ -92,23 +61,22 @@ public struct LocalModel: Sendable, Hashable {
       throw MoxError(.invalidModel, "Sharded weights require model.safetensors.index.json.")
     }
     let bytes = try weights.reduce(0) { total, url in
-      let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+      let size = try ModelAssetFile(url.resolvingSymlinksInPath()).size
       guard size > 8 else { throw MoxError(.invalidModel, "Empty weight shard.") }
+      guard !total.addingReportingOverflow(size).overflow else {
+        throw MoxError(.resourceLimit, "Weight size overflow.")
+      }
       return total + size
     }
-    // Float32 KV upper estimate; prefill step is bounded at 128 in the adapter.
-    let kv = Double(layers) * 2 * Double(kvHeads) * Double(headDim) * 4
-    let work =
-      Double(hidden) * Double(hidden) * 16 + Double(vocab) * 128 * 4 + 128 * Double(hidden)
-      * Double(layers) * 16
-    guard kv < Double(Int.max / 10_000_000), work < Double(Int.max / 4), bytes < Int.max / 4 else {
-      throw MoxError(.resourceLimit, "Model dimensions exceed safe estimation limits.")
-    }
+    let resources = try ModelResources(
+      configuration: JSONSerialization.data(withJSONObject: config), weightBytes: bytes)
     self.directory = directory
-    self.contextSize = context
-    self.weightBytes = bytes
-    self.kvBytesPerToken = Int(kv)
-    self.workspaceBytes = max(64 * 1024 * 1024, Int(work))
+    self.modelType = resources.modelType
+    self.contextSize = resources.contextSize
+    self.weightBytes = resources.weightBytes
+    self.kvBytesPerToken = resources.kvBytesPerToken
+    self.workspaceBytes = resources.workspaceBytes
+    self.resources = resources
     self.id = LocalModelIdentity.identifier(for: directory)
     self.fingerprint = try Self.fingerprint(directory)
   }
@@ -122,7 +90,10 @@ public struct LocalModel: Sendable, Hashable {
       at: directory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
     let records = try files.filter { ["json", "safetensors", "jinja"].contains($0.pathExtension) }
       .sorted { $0.path < $1.path }.map { url in
-        let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        try Task.checkCancellation()
+        let target = url.resolvingSymlinksInPath()
+        _ = try ModelAssetFile(target)
+        let values = try target.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         return
           "\(url.lastPathComponent):\(values.fileSize ?? -1):\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)"
       }

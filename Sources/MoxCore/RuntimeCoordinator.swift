@@ -19,7 +19,14 @@ public protocol LoadedModel: Sendable {
   func unload() async
 }
 public protocol RuntimeBackend: Sendable {
+  /// Native backends can tighten policy to their configured/device ceiling.
+  var memoryBudgetCeilingBytes: Int? { get }
   func load(_ model: LocalModel) async throws -> any LoadedModel
+  func memorySnapshot() -> BackendMemorySnapshot?
+}
+extension RuntimeBackend {
+  public var memoryBudgetCeilingBytes: Int? { nil }
+  public func memorySnapshot() -> BackendMemorySnapshot? { nil }
 }
 public struct RuntimePolicy: Sendable {
   public let budgetBytes: Int
@@ -32,6 +39,9 @@ public struct RuntimePolicy: Sendable {
   }
 }
 public struct RuntimeSnapshot: Sendable {
+  public let pressure: MemoryPressureLevel
+  public let admissionPaused: Bool
+  public let backendMemory: BackendMemorySnapshot?
   public let residentModels: Int
   public let reservedBytes: Int
   public let activeLeases: Int
@@ -64,6 +74,12 @@ public actor RuntimeCoordinator {
   private var queue: [Waiter] = []
   private var occupied = false
   private var closing = false
+  private var pressure: MemoryPressureLevel = .normal
+  private var recoveryTask: Task<Void, Never>?
+  private var pressureTrimTask: Task<Void, Never>?
+  private var pressureEpoch = 0
+  private static let availablePageHeadroomFraction = 0.8
+  private static let pressureRecoveryDelay: Duration = .seconds(5)
   private var idleWaiters: [CheckedContinuation<Void, Never>] = []
   private var reserved = 0
   private var leases = Set<UUID>()
@@ -74,19 +90,95 @@ public actor RuntimeCoordinator {
     availableMemory: @escaping @Sendable () -> Int? = { nil }
   ) {
     self.backend = backend
-    self.policy = policy
+    self.policy = RuntimePolicy(
+      budgetBytes: min(policy.budgetBytes, backend.memoryBudgetCeilingBytes ?? policy.budgetBytes),
+      queueCapacity: policy.queueCapacity, queueTimeout: policy.queueTimeout)
     self.availableMemory = availableMemory
   }
   public func modelStates() -> [(id: String, state: String)] {
     let ids = Set(slots.keys).union(loads.keys)
     return ids.sorted().map { ($0, slots[$0] == nil ? "loading" : "ready") }
   }
+  public func resourceBudgetBytes() -> Int { policy.budgetBytes }
   public func snapshot() -> RuntimeSnapshot {
     .init(
+      pressure: pressure, admissionPaused: pressure != .normal,
+      backendMemory: backend.memorySnapshot(),
       residentModels: slots.count, reservedBytes: reserved, activeLeases: leases.count,
       queued: queue.count, budgetBytes: policy.budgetBytes,
       queueCapacity: policy.queueCapacity,
       queueTimeoutSeconds: Int(policy.queueTimeout.components.seconds))
+  }
+  /// Platform signals enter the same authority as all request admission.
+  public func updatePressure(_ level: MemoryPressureLevel) {
+    pressureEpoch += 1
+    recoveryTask?.cancel()
+    if level == .normal {
+      guard pressure != .normal else { return }
+      let epoch = pressureEpoch
+      recoveryTask = Task {
+        do { try await Task.sleep(for: Self.pressureRecoveryDelay) } catch { return }
+        if epoch == pressureEpoch { pressure = .normal }
+      }
+      return
+    }
+    pressure = level
+    schedulePressureTrim()
+    logger.warning("phase=memory-pressure level=\(level.rawValue, privacy: .public)")
+    if level == .critical {
+      // cancel() requests stop; reservations remain until the existing backend barrier.
+      handles.values.forEach { $0.cancel() }
+      for id in queue.map(\.id) {
+        expire(
+          id, error: MoxError(.resourceLimit, "Critical memory pressure; retry after recovery."))
+      }
+    }
+  }
+  private func schedulePressureTrim() {
+    guard pressure != .normal, pressureTrimTask == nil else { return }
+    pressureTrimTask = Task { await self.trimIdleForPressure() }
+  }
+  private func trimIdleForPressure() async {
+    defer { pressureTrimTask = nil }
+    guard !occupied, !closing, pressure != .normal else { return }
+    occupied = true
+    await trimPressureResidents()
+    release()
+  }
+  /// Caller owns the GPU gate. Fixed residents survive pressure; freed reservations
+  /// reflect completed backend unload, never a cancellation request.
+  private func trimPressureResidents() async {
+    while pressure != .normal,
+      let slot = slots.values.filter({
+        !pinnedModelIDs.contains($0.model.id)
+          && !handleModels.values.contains($0.model.id)
+      }).min(by: { $0.tick < $1.tick })
+    {
+      slots.removeValue(forKey: slot.model.id)
+      await slot.loaded.unload()
+      reserved -= slot.model.weightBytes
+    }
+  }
+  private func checkAdmissionState() throws {
+    guard !closing else { throw MoxError(.shuttingDown, "Runtime is shutting down.") }
+    guard pressure == .normal else {
+      throw MoxError(
+        .resourceLimit,
+        "Memory pressure \(pressure.rawValue); new work paused. Retry after 5 seconds of normal pressure."
+      )
+    }
+  }
+  public func assess(model: LocalModel, maxTokens: Int) -> ResourceAssessment {
+    let headroom = availableMemory().map {
+      Int(Double(max(0, $0)) * Self.availablePageHeadroomFraction)
+    }
+    let currentReservation = min(reserved, policy.budgetBytes)
+    let remainingBudget = policy.budgetBytes - currentReservation
+    let dynamicCeiling = currentReservation + min(remainingBudget, headroom ?? remainingBudget)
+    let ceiling = pressure == .normal ? dynamicCeiling : 0
+    return model.resources.assessment(
+      maxTokens: maxTokens, budgetBytes: ceiling,
+      residentBytes: reserved, alreadyResident: slots[model.id] != nil, admissionPressure: pressure)
   }
   public func setPinned(modelID: String, _ pinned: Bool) {
     if pinned { pinnedModelIDs.insert(modelID) }
@@ -97,15 +189,23 @@ public actor RuntimeCoordinator {
     guard handles[request.id] == nil else {
       throw MoxError(.invalidParameters, "Request ID is already active.")
     }
+    try checkAdmissionState()
     try model.validateUnchanged()
     try validateResidentReference(model)
-    // Reserve a context-bounded KV allowance; exact token count is checked by the processor.
-    let tokens = min(model.contextSize, 8192 + request.sampling.maxTokens)
-    let transient = model.kvBytesPerToken * tokens + model.workspaceBytes
-    guard model.weightBytes * 2 + transient <= policy.budgetBytes else {
+    guard request.sampling.maxTokens < model.contextSize else {
       throw MoxError(
-        .resourceLimit, "Model weights, load peak and KV/workspace exceed the safe memory budget.")
+        .contextLimit, "Requested output leaves no room for input; reduce maxTokens explicitly.")
     }
+    // Reserve a context-bounded KV allowance; exact token count is checked by the processor.
+    let estimate = model.resources.assessment(
+      maxTokens: request.sampling.maxTokens,
+      budgetBytes: policy.budgetBytes, alreadyResident: slots[model.id] != nil)
+    guard let kv = estimate.kvBytes, let workspace = estimate.workspaceBytes,
+      estimate.status != .exceedsBudget, estimate.status != .unknown
+    else {
+      throw MoxError(.resourceLimit, estimate.summary)
+    }
+    let transient = kv + workspace
     let handle = GenerationHandle(requestID: request.id)
     handles[request.id] = handle
     handleModels[request.id] = model.id
@@ -128,6 +228,7 @@ public actor RuntimeCoordinator {
       handle.emit(.phase("queued"))
       try await acquire(request.id)
       acquired = true
+      try checkAdmissionState()
       try Task.checkCancellation()
       try model.validateUnchanged()
       try validateResidentReference(model)
@@ -178,10 +279,17 @@ public actor RuntimeCoordinator {
     }
     leases.remove(request.id)
     reserved -= extra
-    if acquired { release() }
     handles.removeValue(forKey: request.id)
     handleModels.removeValue(forKey: request.id)
     if !handleModels.values.contains(model.id) { loads.removeValue(forKey: model.id) }
+    if acquired {
+      await trimPressureResidents()
+      release()
+    } else {
+      // A cancelled waiter can remove the last reference after the active owner
+      // already trimmed. Revisit idle residents through the same GPU gate.
+      schedulePressureTrim()
+    }
     logger.info(
       "model=\(model.id, privacy: .public) request=\(request.id.uuidString, privacy: .public) phase=\(handle.isCancelled ? "cancel" : "stopped", privacy: .public) elapsed_seconds=\(Self.seconds(start.duration(to: .now))) leases=\(self.leases.count)"
     )
@@ -197,40 +305,66 @@ public actor RuntimeCoordinator {
     guard !closing else { throw MoxError(.shuttingDown, "Runtime is shutting down.") }
     try model.validateUnchanged()
     try validateResidentReference(model)
+    try checkAdmissionState()
     if slots[model.id] != nil { return }
-    guard model.weightBytes * 2 <= policy.budgetBytes else {
-      throw MoxError(.resourceLimit, "Model load peak exceeds the safe memory budget.")
+    // Explicit load includes the adapter's one-token warmup, not just weight IO.
+    let warmup = model.resources.assessment(maxTokens: 1, budgetBytes: policy.budgetBytes)
+    guard let required = warmup.peakBytes, let kv = warmup.kvBytes,
+      let workspace = warmup.workspaceBytes, warmup.status != .exceedsBudget else {
+      throw MoxError(.resourceLimit, warmup.summary)
     }
+    let transient = kv + workspace
     let id = UUID()
     try await acquire(id)
     var extra = 0
     do {
       try Task.checkCancellation()
+      try checkAdmissionState()
       if slots[model.id] == nil {
-        try await reclaimCapacity(required: model.weightBytes * 2, excluding: model.id)
-        extra = model.weightBytes * 2
+        try await reclaimCapacity(required: required, excluding: model.id)
+        extra = required
         reserved += extra
-        try await loadIntoSlot(model, requestID: id, transient: 0)
+        try await loadIntoSlot(model, requestID: id, transient: transient)
         extra -= model.weightBytes
       }
       reserved -= extra
+      extra = 0
+      await trimPressureResidents()
+      try checkAdmissionState()
       release()
     } catch {
       reserved -= extra
       loads.removeValue(forKey: model.id)
+      await trimPressureResidents()
       release()
       throw error
     }
   }
   private func reclaimCapacity(required: Int, excluding modelID: String) async throws {
-    let headroom = availableMemory().map { Int(Double($0) * 0.8) }
-    let ceiling = min(policy.budgetBytes, headroom.map { reserved + $0 } ?? policy.budgetBytes)
-    while reserved + required > ceiling {
-      guard let idle = slots.values.filter({
-        $0.model.id != modelID && !pinnedModelIDs.contains($0.model.id)
-          && !handleModels.values.contains($0.model.id)
-      }).min(by: { $0.tick < $1.tick })
-      else { throw MoxError(.resourceLimit, "No idle model can free enough memory.") }
+    while true {
+      try Task.checkCancellation()
+      try checkAdmissionState()
+      // VM free+inactive is advisory reclaimable pages, not total process allocation
+      // capacity. Re-sample after each confirmed unload; normal pressure is no exemption.
+      let headroom = availableMemory().map {
+        Int(Double(max(0, $0)) * Self.availablePageHeadroomFraction)
+      }
+      if required <= policy.budgetBytes - reserved,
+        headroom.map({ required <= $0 }) ?? true
+      {
+        return
+      }
+      guard
+        let idle = slots.values.filter({
+          $0.model.id != modelID && !pinnedModelIDs.contains($0.model.id)
+            && !handleModels.values.contains($0.model.id)
+        }).min(by: { $0.tick < $1.tick })
+      else {
+        throw MoxError(
+          .resourceLimit,
+          "No idle unpinned model can free enough memory. Choose smaller weights or output allowance, or explicitly unload fixed models when idle."
+        )
+      }
       slots.removeValue(forKey: idle.model.id)
       await idle.loaded.unload()
       reserved -= idle.model.weightBytes
@@ -320,13 +454,16 @@ public actor RuntimeCoordinator {
     occupied = true
     await slot.loaded.unload()
     reserved -= slot.model.weightBytes
+    await trimPressureResidents()
     release()
   }
   public func shutdown() async {
     closing = true
+    recoveryTask?.cancel()
     let running = Array(handles.values)
     running.forEach { $0.cancel() }
     for handle in running { await handle.waitUntilStopped() }
+    await pressureTrimTask?.value
     if occupied { await withCheckedContinuation { idleWaiters.append($0) } }
     for slot in slots.values { await slot.loaded.unload() }
     slots.removeAll()

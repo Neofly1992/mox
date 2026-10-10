@@ -89,3 +89,41 @@ python3 scripts/package-release.py --output .build/release-check-new
 ```sh
 python3 scripts/verify-cli.py --binary .build/Release/mox --model /absolute/path/to/test-model
 ```
+
+## 诊断与内存保护验证
+
+规则测试覆盖资源包络/溢出/未知布局、context/output 边界、共享驻留、预览后余量变化、活动及排队请求的压力取消清理/恢复延迟与 pin，及 doctor 离线只读、部分失败、目录安全与实际访问权限/版本、超时/服务端停止确认/取消/脱敏和真实 HTTP 预览/完整性。通过注入压力信号验证响应，禁止用耗尽整机内存制造测试。
+
+```sh
+scripts/test.sh rules
+python3 scripts/verify-file-boundaries.py --binary .build/Release/mox
+MOX_TEST_MODEL="$PWD/.build/test-models/qwen2.5-0.5b-4bit" scripts/test.sh mlx
+python3 scripts/verify-diagnostics.py --binary .build/Release/mox \
+  --model .build/test-models/qwen2.5-0.5b-4bit --output .build/diagnostics-real.json
+scripts/test.sh ui -only-testing:MoxUITests/MoxUITests/testDoctorAndResourceAssessment \
+  -only-testing:MoxUITests/MoxUITests/testFixtureLongReplyStopRetryAndHistory \
+  -only-testing:MoxUITests/MoxUITests/testPublicAPIControls \
+  -only-testing:MoxUITests/MoxUITests/testLaunchAndChat
+```
+
+异常文件入口 `verify-file-boundaries.py` 使用临时根、命名管道和自己启动的进程，验证 doctor 期限/信号退出、预览后参数查询仍可用及服务正常退出；外层进程期限防止回归卡死自测，不加载模型。
+
+真实诊断入口用临时根和明确指定的已有模型，覆盖服务未启动、现有 worker 握手、模型完整性、JSON 脱敏、真实 MLX 生成、公开 OpenAI/Anthropic 文本与流式 HTTP，以及人为降低 worker budget 的跨入口拒绝（不制造系统压力）。产物先用统一构建入口重建；源码 fingerprint 随修改变化，不以旧产物结果代替本轮验证。来源联网验证另用 `MOX_TEST_REAL_SOURCES=1 scripts/test.sh rules`，不自动下载权重。原始结果留在 `.build`，不入 Git。
+
+人工验收（不得代填）：打开 App → 环境诊断 → 开始诊断，检查原因和下一步建议；查看下载计划及模型测试区的资源组成；按 `verify-diagnostics.py` 的同类低预算配置确认 resourceLimit 后仍能查看诊断；普通预算下发送短请求，确认真实回复、停止后可再次生成。测试根在临时目录，停止自己启动的服务后再清理；默认个人库不用于验收夹具。
+
+人工安全拒绝可直接复现（已构建 Release 与已有公开 fixture 为准备条件）：
+
+```sh
+# 终端 A：记下输出的根路径，保持此服务运行
+ROOT=$(mktemp -d /private/tmp/mox-accept.XXXXXX)
+echo "$ROOT"
+.build/Release/mox serve --data-root "$ROOT" --budget-bytes 67108864
+# 终端 B：把 DATA_ROOT 替换为上一步输出，不使用个人数据根
+.build/Release/mox doctor --data-root DATA_ROOT --json
+.build/Release/mox chat --data-root DATA_ROOT \
+  --model-path "$PWD/.build/test-models/qwen2.5-0.5b-4bit" \
+  --prompt 'Say hello briefly.' --max-tokens 8 --temperature 0
+```
+
+预期第二条命令退出 1、报告 resourceLimit、不产生回复、不加载模型。终端 A Ctrl-C 停止低预算服务；用同一根重新 `serve --data-root "$ROOT"`（去掉预算覆盖），终端 B 重跑 chat，应正常生成。App 诊断与评估使用另一个隔离根启动：`MOX_DATA_ROOT="$(mktemp -d /private/tmp/mox-gui-accept.XXXXXX)" .build/Release/Mox.app/Contents/MacOS/Mox`，添加已有 fixture 本地目录，查看测试区预估并生成。完成后正常退出 App/停止自己启动的 serve；只在核对根路径后删除这些临时根。诊断问题使用 App“导出诊断”及 CLI JSON 报告定位，不提交原始报告或测试数据。

@@ -8,17 +8,17 @@ enum WeightInspection {
     func invalid() -> MoxError {
       MoxError(.invalidModel, "Invalid or truncated safetensors asset: \(file.lastPathComponent).")
     }
-    let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-    let handle = try FileHandle(forReadingFrom: file)
-    defer { try? handle.close() }
-    guard let prefix = try handle.read(upToCount: 8), prefix.count == 8 else { throw invalid() }
+    let asset = try ModelAssetFile(file)
+    let size = asset.size
+    guard size >= 8 else { throw invalid() }
+    let prefix = try asset.read(count: 8)
     let length = prefix.enumerated().reduce(UInt64(0)) {
       $0 | UInt64($1.element) << ($1.offset * 8)
     }
-    guard length > 0, length <= 16 * 1024 * 1024, length <= max(0, size - 8),
-      let header = try handle.read(upToCount: Int(length)), header.count == Int(length),
-      let object = try JSONSerialization.jsonObject(with: header) as? [String: Any]
+    guard length > 0, length <= 16 * 1024 * 1024, length <= max(0, size - 8)
     else { throw invalid() }
+    let header = try asset.read(count: Int(length))
+    guard let object = try JSONSerialization.jsonObject(with: header) as? [String: Any] else { throw invalid() }
     let payloadSize = size - 8 - Int(length)
     var ranges: [(Int, Int)] = []
     var names = Set<String>()
@@ -27,6 +27,7 @@ enum WeightInspection {
       "BF16": 2, "I32": 4, "U32": 4, "F32": 4, "F64": 8, "I64": 8, "U64": 8,
     ]
     for (name, value) in object where name != "__metadata__" {
+      try Task.checkCancellation()
       guard let tensor = value as? [String: Any], let offsets = tensor["data_offsets"] as? [Int],
         offsets.count == 2,
         offsets[0] >= 0, offsets[1] >= offsets[0], offsets[1] <= payloadSize,

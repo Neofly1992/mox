@@ -51,7 +51,7 @@ mox models default-source REGISTRY_UUID
 mox serve --default-max-tokens 256 --queue-capacity 8 --queue-timeout-seconds 60
 ```
 
-逐字段优先级：请求 > 模型 > worker 启动覆盖 > 持久全局 > 产品默认。继承清除该层显式值，启动 flags 不持久化。serve 内存预算只可压低设备安全建议值；未知或不安全输入拒绝。来源/镜像和凭据配置目前通过 App 的来源连接设置，CLI 不承诺不存在的通用 config/doctor 命令。来源见 [SOURCES](SOURCES.md)。
+逐字段优先级：请求 > 模型 > worker 启动覆盖 > 持久全局 > 产品默认。继承清除该层显式值，启动 flags 不持久化。serve 内存预算只可压低设备安全建议值；未知或不安全输入拒绝。来源/镜像和凭据配置目前通过 App 的来源连接设置，CLI 不提供通用 config 命令；只读诊断见下方 doctor。来源见 [SOURCES](SOURCES.md)。
 
 短命令连接已有服务，必要时启动并停止自己的临时 worker。`serve` 是持续前台服务，Ctrl-C/SIGTERM 协调退出；已有 root 所有者时明确冲突，不热接管。要使用公开 API，保持服务运行，然后：
 
@@ -66,3 +66,17 @@ mox api disable
 api 命令不自动启动临时服务。rotate 会让旧 key 失效，key 输出不要放入问题报告或 shell 日志。连接 API 的具体字段见 [API](API.md)。
 
 CLI 的 `--data-root /absolute/path` 选择独立数据根；App 用 `MOX_DATA_ROOT`。同根共享同一服务，不同根有不同索引与凭据身份。常规运行无需 root 或 Python。数据和诊断见 [DATA](DATA.md)。
+
+## 只读诊断
+
+```sh
+mox doctor --data-root /absolute/path/to/data
+mox doctor --data-root /absolute/path/to/data --json
+# 显式耗时/联网检查：服务须已启动，不会自动启动、下载权重或加载模型
+mox doctor --data-root /absolute/path/to/data --model MODEL_ALIAS --timeout-seconds 60
+mox doctor --data-root /absolute/path/to/data --source-repository owner/model
+```
+
+逐项进度写 stderr，`--json` 的结构化报告独占 stdout。退出码：0 表示完成且无失败（警告/跳过仍可存在，应阅读结果），1 表示失败或超时，2 为参数错误，130 为取消。Ctrl-C/SIGTERM 取消当前检查，未运行项目标取消；服务端停止无法确认时结果明确说明。默认每项 15 秒，允许 1–120 秒。无 discovery 的服务检查跳过，本地检查继续，不创建数据根。
+
+`models plan` 与 `models pull` 在下载前显示磁盘峰值与内存评估；`chat` 展示有效参数对应的内存包络。状态推荐/紧张/超预算/未知不代替运行时重新准入；下载不会因为内存风险被禁止。原有磁盘空间检查保留。

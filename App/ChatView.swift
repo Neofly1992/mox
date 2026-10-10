@@ -70,6 +70,11 @@ struct ChatView: View {
           Button("选择模型…", action: chooseModel).disabled(chat.isWorking || chat.isClosing)
             .accessibilityIdentifier("chooseModel")
         }.padding()
+        if !chat.modelPath.isEmpty {
+          Text(chat.resourceAssessment.map { "\($0.status.userLabel) · \($0.summary)" } ?? "内存评估尚不可用；运行时会重新检查安全预算。")
+            .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+            .accessibilityIdentifier("resourceAssessment")
+        }
         Divider()
         if let error = chat.error {
           Text(error).foregroundStyle(.red).textSelection(.enabled).padding()

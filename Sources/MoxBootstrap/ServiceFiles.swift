@@ -40,12 +40,14 @@ public struct ServiceFiles: Sendable {
       "Library/Application Support/Mox"
     ).path
   }
-  public init(path: String) throws {
+  public init(path: String, prepareDirectories: Bool = true) throws {
     let requested = URL(fileURLWithPath: path).standardizedFileURL
-    try FileManager.default.createDirectory(at: requested, withIntermediateDirectories: true)
+    if prepareDirectories {
+      try FileManager.default.createDirectory(at: requested, withIntermediateDirectories: true)
+    }
     root = requested.resolvingSymlinksInPath()
     run = root.appendingPathComponent("run", isDirectory: true)
-    try Self.secureDirectory(run)
+    if prepareDirectories { try Self.secureDirectory(run) }
   }
   public static func secureDirectory(_ url: URL) throws {
     if !FileManager.default.fileExists(atPath: url.path) {
@@ -64,21 +66,33 @@ public struct ServiceFiles: Sendable {
   }
   public func read(matchingBuild: Bool = true) throws -> Discovery? {
     let path = run.appendingPathComponent("discovery.json").path
-    let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    try Task.checkCancellation()
+    var before = stat()
+    if lstat(path, &before) < 0 {
+      if errno == ENOENT { return nil }
+      throw MoxError(.serviceConflict, "Cannot inspect service discovery.")
+    }
+    guard before.st_mode & S_IFMT == S_IFREG else {
+      throw MoxError(.serviceConflict, "Unsafe discovery file type.")
+    }
+    let fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
     if fd < 0 && errno == ENOENT { return nil }
     guard fd >= 0 else { throw MoxError(.serviceConflict, "Cannot read service discovery.") }
     defer { close(fd) }
     var info = stat()
     guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == getuid(),
-      info.st_mode & 0o077 == 0, info.st_size <= 16384
+      info.st_mode & 0o077 == 0, info.st_size >= 0, info.st_size <= 16384,
+      info.st_dev == before.st_dev, info.st_ino == before.st_ino
     else { throw MoxError(.serviceConflict, "Unsafe discovery file.") }
     var bytes = [UInt8](repeating: 0, count: Int(info.st_size))
     var count = 0
     while count < bytes.count {
+      try Task.checkCancellation()
       let remaining = bytes.count - count
       let n = bytes.withUnsafeMutableBytes {
         Darwin.read(fd, $0.baseAddress!.advanced(by: count), remaining)
       }
+      if n < 0, errno == EINTR { continue }
       guard n > 0 else { throw MoxError(.serviceConflict, "Incomplete discovery file.") }
       count += n
     }

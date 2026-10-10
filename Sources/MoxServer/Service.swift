@@ -38,6 +38,10 @@ public actor InferenceService {
   private var draining = false
   private let library: ModelLibraryService
   private var diagnostics = DiagnosticRing()
+  private var doctorTasks: [UUID: Task<DoctorResult, Error>] = [:]
+  private var cancelledDoctorIDs: [UUID] = []
+  private static let maximumDoctorTasks = 4
+  private static let rememberedDoctorCancellations = 256
   public init(
     identity: ServiceIdentity, token: String, runtime: RuntimeCoordinator,
     downloads: DownloadManager? = nil, sources: (any ModelSourceFactory)? = nil,
@@ -55,12 +59,70 @@ public actor InferenceService {
   public func shutdown() async {
     draining = true
     revision &+= 1
+    await library.shutdown()
     await publicAPI?.shutdown()
     let active = Array(handles.values)
     active.forEach { $0.cancel() }
     for handle in active { await handle.waitUntilStopped() }
+    let inspections = Array(doctorTasks.values)
+    inspections.forEach { $0.cancel() }
+    for inspection in inspections { _ = try? await inspection.value }
     await downloads?.shutdown()
     await runtime.shutdown()
+  }
+  private func inspectForDoctor(_ body: DoctorInspectionBody) async throws -> DoctorResult {
+    guard !draining else { throw MoxError(.shuttingDown, "Service is stopping.") }
+    guard (body.model == nil) != (body.source == nil) else {
+      throw MoxError(.invalidParameters, "Select exactly one explicit diagnostic check.")
+    }
+    guard !cancelledDoctorIDs.contains(body.requestID) else { throw CancellationError() }
+    guard doctorTasks[body.requestID] == nil, doctorTasks.count < Self.maximumDoctorTasks else {
+      throw MoxError(.busy, "Diagnostic check capacity reached; try again later.")
+    }
+    let reference = try body.model.map { try modelReference($0) }
+    let task = Task { [library] in
+      if let reference {
+        try await library.inspectModelReadOnly(reference)
+        return DoctorResult(
+          id: "model.integrity", status: .passed,
+          reason:
+            "Model assets inspected; managed files verified against manifest digests. Local references have no trusted remote digest."
+        )
+      }
+      let source = body.source!
+      _ = try await library.planDownload(
+        .init(
+          registryID: source.registryID,
+          provider: source.provider, endpoint: source.endpoint, repository: source.repository,
+          selector: source.selector, variant: source.variant))
+      return DoctorResult(
+        id: "source.connectivity", status: .passed,
+        reason:
+          "Selected source/mirror and stored credentials resolved repository revision and file inventory. No model weights downloaded or loaded."
+      )
+    }
+    doctorTasks[body.requestID] = task
+    defer { doctorTasks.removeValue(forKey: body.requestID) }
+    return try await withTaskCancellationHandler {
+      try await task.value
+    } onCancel: {
+      task.cancel()
+    }
+  }
+  private func cancelDoctor(_ id: UUID) async -> DoctorResult {
+    if !cancelledDoctorIDs.contains(id) {
+      cancelledDoctorIDs.append(id)
+      if cancelledDoctorIDs.count > Self.rememberedDoctorCancellations {
+        cancelledDoctorIDs.removeFirst()
+      }
+    }
+    if let task = doctorTasks[id] {
+      task.cancel()
+      _ = try? await task.value
+    }
+    return .init(
+      id: "inspection.cancel", status: .cancelled,
+      reason: "Diagnostic cancellation acknowledged; any registered check has stopped.")
   }
   public func attachPublicAPI(_ manager: PublicAPIManager) { publicAPI = manager }
   private func recordFailure(_ failure: Error, path: String) {
@@ -194,7 +256,7 @@ public actor InferenceService {
     let snap = await runtime.snapshot()
     let models = await runtime.modelStates().map { ModelState(modelID: $0.id, state: $0.state) }
     let activeDownloads = try await downloads?.activeOperationCount() ?? 0
-    return ServiceState(
+    var state = ServiceState(
       instanceID: identity.instanceID, revision: revision,
       serviceState: draining ? "draining" : "running", ownership: identity.ownership,
       residentModels: snap.residentModels, reservedBytes: snap.reservedBytes,
@@ -205,6 +267,10 @@ public actor InferenceService {
       requests: states.values.filter { $0.terminal == nil }.sorted {
         $0.requestID.uuidString < $1.requestID.uuidString
       }, libraryRecovery: await downloads?.recoveryStatus() ?? .init())
+    state.memoryPressure = snap.pressure
+    state.admissionPaused = snap.admissionPaused
+    state.backendMemory = snap.backendMemory
+    return state
   }
   private func begin(_ body: GenerateBody, output: GenerationHandle) async throws
     -> GenerationHandle
@@ -295,7 +361,8 @@ public actor InferenceService {
         && ([
           "/mox/v1/generations", "/mox/v1/downloads", "/mox/v1/downloads/plan",
           "/mox/v1/registries", "/mox/v1/config/default", "/mox/v1/config/sampling",
-          "/mox/v1/config/effective", "/mox/v1/models/import", "/mox/v1/public-api",
+          "/mox/v1/config/effective", "/mox/v1/resources", "/mox/v1/doctor/inspect",
+          "/mox/v1/models/import", "/mox/v1/public-api",
         ]
         .contains(path) || modelSettingsBody)
       if !acceptsBody,
@@ -364,6 +431,29 @@ public actor InferenceService {
           try await downloads.setGlobalSampling(
             body.settings,
             expectedRevision: body.expectedRevision))
+      }
+      if request.method == .post, path.hasPrefix("/mox/v1/doctor/"), path.hasSuffix("/cancel") {
+        let parts = path.split(separator: "/")
+        guard parts.count == 5, let id = UUID(uuidString: String(parts[3])) else {
+          throw MoxError(.invalidParameters, "Invalid diagnostic request ID.")
+        }
+        return try json(await cancelDoctor(id))
+      }
+      if request.method == .post, path == "/mox/v1/doctor/inspect" {
+        let data = try await RequestBodyReader.read(
+          request, channel: context.channel,
+          limit: 8192, description: "Diagnostic check request exceeds 8 KiB.")
+        bodyConsumed = true
+        return try json(try await inspectForDoctor(Wire.decode(DoctorInspectionBody.self, data)))
+      }
+      if request.method == .post, path == "/mox/v1/resources" {
+        let data = try await RequestBodyReader.read(
+          request, channel: context.channel,
+          limit: 4096, description: "Resource preview exceeds 4 KiB.")
+        bodyConsumed = true
+        let body = try Wire.decode(SamplingResolutionBody.self, data)
+        return try json(
+          try await library.assessResources(modelReference(body.model), explicit: body.explicit))
       }
       if request.method == .post, path == "/mox/v1/config/effective" {
         let data = try await RequestBodyReader.read(

@@ -150,7 +150,8 @@ public struct ArtifactStore: Sendable {
     let metadata = try url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey, .isRegularFileKey])
     guard metadata.isSymbolicLink != true, metadata.isRegularFile == true,
       let bytes = metadata.fileSize, bytes <= ArtifactValidation.maximumManifestBytes else { throw MoxError(.storageFailed, "Invalid installed manifest.") }
-    let manifest = try JSONDecoder().decode(ArtifactManifest.self, from: Data(contentsOf: url))
+    let asset = try ModelAssetFile(url, maximumBytes: ArtifactValidation.maximumManifestBytes)
+    let manifest = try JSONDecoder().decode(ArtifactManifest.self, from: asset.read(count: asset.size))
     try ArtifactValidation.validate(manifest)
     guard child.lastPathComponent == (try ArtifactValidation.identifier(for: manifest.origin)) else { throw MoxError(.storageFailed, "Artifact identity does not match its directory.") }
     if verifyFiles { try verifyContents(manifest, in: child, synchronizeFiles: false) }

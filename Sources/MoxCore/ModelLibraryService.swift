@@ -4,6 +4,8 @@ import OSLog
 
 /// The runtime port covers the resource operations required by library use cases.
 public protocol ModelRuntime: Sendable {
+  func resourceBudgetBytes() async -> Int
+  func assess(model: LocalModel, maxTokens: Int) async -> ResourceAssessment
   func load(model: LocalModel) async throws
   func unload(modelID: String) async throws
   func setPinned(modelID: String, _ pinned: Bool) async
@@ -59,14 +61,57 @@ public actor ModelLibraryService {
   }
   private var starting: [String: Int] = [:]
   private var removing = Set<String>()
+  private var closing = false
+  private var localInspections: [UUID: Task<LocalModel, Error>] = [:]
+  private static let maximumLocalInspections = 4
+  private let inspectLocalFiles: @Sendable (String) async throws -> LocalModel
   public init(
     downloads: DownloadManager?, runtime: any ModelRuntime,
-    sources: (any ModelSourceFactory)? = nil, launchSampling: SamplingSettings = .init()
+    sources: (any ModelSourceFactory)? = nil, launchSampling: SamplingSettings = .init(),
+    inspectLocalFiles: @escaping @Sendable (String) async throws -> LocalModel = {
+      try LocalModel(path: $0)
+    }
   ) {
     self.downloads = downloads
     self.runtime = runtime
     self.sources = sources
     self.launchSampling = launchSampling
+    self.inspectLocalFiles = inspectLocalFiles
+  }
+  /// Cancel and join owned file checks before shutting down their dependencies.
+  public func shutdown() async {
+    closing = true
+    let tasks = Array(localInspections.values)
+    tasks.forEach { $0.cancel() }
+    for task in tasks { _ = try? await task.value }
+  }
+  private func inspectLocalModel(_ path: String) async throws -> LocalModel {
+    guard !closing else { throw MoxError(.shuttingDown, "Model library is stopping.") }
+    try Task.checkCancellation()
+    guard localInspections.count < Self.maximumLocalInspections else {
+      throw MoxError(.busy, "Local model inspection capacity reached; retry shortly.")
+    }
+    let id = UUID()
+    let inspect = inspectLocalFiles
+    let task = Task.detached {
+      try Task.checkCancellation()
+      do {
+        let model = try await inspect(path)
+        try Task.checkCancellation()
+        return model
+      } catch {
+        // A file error racing with cancellation must not become an unknown preview.
+        try Task.checkCancellation()
+        throw error
+      }
+    }
+    localInspections[id] = task
+    defer { localInspections[id] = nil }
+    return try await withTaskCancellationHandler {
+      let model = try await task.value
+      try Task.checkCancellation()
+      return model
+    } onCancel: { task.cancel() }
   }
   private func library() throws -> DownloadManager {
     guard let downloads else { throw MoxError(.shuttingDown, "Model library is unavailable.") }
@@ -194,9 +239,65 @@ public actor ModelLibraryService {
       variant: reference.variant)
   }
   public func planDownload(_ reference: ModelPullRequest) async throws -> ModelDownloadPlan {
-    let (_, manifest, _) = try await resolvePull(reference)
-    return try await library().plan(manifest)
+    let (source, manifest, _) = try await resolvePull(reference)
+    let disk = try await library().plan(manifest)
+    let budget = await runtime.resourceBudgetBytes()
+    let resources: ResourceAssessment
+    do {
+      guard let config = try await source.resourceConfiguration(manifest) else {
+        throw MoxError(.invalidModel, "Small model configuration unavailable.")
+      }
+      let bytes = manifest.files.filter { $0.path.hasSuffix(".safetensors") }.reduce(Int64(0)) {
+        $0 + $1.bytes
+      }
+      let model = try ModelResources(configuration: config, weightBytes: Int(bytes))
+      resources = model.assessment(maxTokens: Sampling.defaultMaxTokens, budgetBytes: budget)
+    } catch is CancellationError { throw CancellationError() } catch {
+      resources = .unknown(
+        budgetBytes: budget,
+        reason:
+          "Model metadata is unavailable or unsupported; no weights were fetched for estimation.")
+    }
+    try Task.checkCancellation()
+    return .init(
+      manifest: manifest, totalBytes: disk.totalBytes, peakBytes: disk.peakBytes,
+      availableBytes: disk.availableBytes, resources: resources)
   }
+  /// Doctor owns this cancellable read-only inspection, separate from recovery state.
+  public func inspectModelReadOnly(_ reference: ModelReference) async throws {
+    let (path, item) = try await resolve(reference)
+    try beginUsing(path)
+    defer { endUsing(path) }
+    if let item, item.manifest != nil {
+      try await library().inspectInstallationReadOnly(item)
+      return
+    }
+    _ = try await inspectLocalModel(path)
+  }
+  public func assessResources(_ reference: ModelReference, explicit: SamplingSettings = .init())
+    async throws -> ResourceAssessment
+  {
+    let (path, _) = try await resolve(reference)
+    try beginUsing(path)
+    defer { endUsing(path) }
+    let effective = try await resolveSampling(reference, explicit: explicit)
+    do {
+      let model = try await inspectLocalModel(path)
+      return await runtime.assess(model: model, maxTokens: effective.maxTokens)
+    } catch is CancellationError {
+      throw CancellationError()
+    } catch let error as MoxError where error.code == .busy || error.code == .shuttingDown {
+      throw error
+    } catch {
+      try Task.checkCancellation()
+      return .unknown(
+        budgetBytes: await runtime.resourceBudgetBytes(),
+        reason:
+          "Model assets or architecture cannot be reliably assessed. Runtime validation will reject unsupported assets."
+      )
+    }
+  }
+
   public func startDownload(_ reference: ModelPullRequest) async throws -> UUID {
     let (source, manifest, endpoint) = try await resolvePull(reference)
     let downloads = try library()
@@ -269,7 +370,7 @@ public actor ModelLibraryService {
   ) async throws -> GenerationPlan {
     let (path, item) = try await resolve(reference)
     try Task.checkCancellation()
-    let model = try LocalModel(path: path)
+    let model = try await inspectLocalModel(path)
     if requireVerifiedTools, request.toolChoice == .auto {
       guard let item, VerifiedToolModel.supports(item), model.modelType == "qwen3" else {
         throw MoxError(.unsupportedInput, "This model has no verified tool-call capability.")
@@ -362,7 +463,7 @@ public actor ModelLibraryService {
     let (path, _) = try await resolve(.directory(item.path), verifyContents: true)
     try beginUsing(path)
     defer { endUsing(path) }
-    let model = try LocalModel(path: path)
+    let model = try await inspectLocalModel(path)
     if item.pinned { await runtime.setPinned(modelID: model.id, true) }
     try await runtime.load(model: model)
   }

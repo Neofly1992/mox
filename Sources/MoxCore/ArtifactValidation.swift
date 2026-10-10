@@ -77,13 +77,16 @@ public enum ArtifactValidation {
     guard values.isRegularFile == true, Int64(values.fileSize ?? -1) == file.bytes else {
       throw MoxError(.invalidModel, "Artifact file size or type does not match its manifest.")
     }
-    let handle = try FileHandle(forReadingFrom: url)
-    defer { try? handle.close() }
+    let asset = try ModelAssetFile(url)
+    guard Int64(asset.size) == file.bytes else {
+      throw MoxError(.invalidModel, "Artifact changed during verification.")
+    }
     var sha256 = SHA256()
     var git = Insecure.SHA1()
     git.update(data: Data("blob \(file.bytes)\0".utf8))
     var count: Int64 = 0
-    while let chunk = try handle.read(upToCount: hashChunkBytes), !chunk.isEmpty {
+    while count < file.bytes {
+      let chunk = try asset.read(count: min(hashChunkBytes, Int(file.bytes - count)))
       try Task.checkCancellation()
       count += Int64(chunk.count)
       guard count <= file.bytes else {

@@ -10,8 +10,10 @@ struct Models: AsyncParsableCommand {
     abstract: "Get and inspect managed MLX models.",
     subcommands: [Plan.self, Pull.self, List.self, Show.self, Import.self, Remove.self,
       Select.self, Load.self, Unload.self, Pin.self, SamplingConfig.self,
-      DownloadAction.self, Sources.self, DefaultSource.self])
-  private static func request(client: ServiceClient, provider: ModelProvider?,
+      DownloadAction.self, Sources.self, DefaultSource.self,
+    ])
+  private static func request(
+    client: ServiceClient, provider: ModelProvider?,
     repository: String, revision: String?, variant: String, endpoint: String?
   ) async throws -> PullBody {
     let library = try await client.library()
@@ -77,6 +79,7 @@ struct Models: AsyncParsableCommand {
       let body = try await Models.request(client: connection.client, provider: kind,
         repository: repository, revision: revision, variant: variant, endpoint: endpoint)
       let plan = try await connection.client.planPull(body)
+      print(plan.resources?.summary ?? "Memory estimate unavailable.")
       print("revision: \(plan.origin.revision)")
       print("files: \(plan.fileCount), download bytes: \(plan.totalBytes), peak bytes: \(plan.peakBytes)")
       if let available = plan.availableBytes { print("available bytes: \(available)") }
@@ -101,6 +104,10 @@ struct Models: AsyncParsableCommand {
       defer { connection.worker?.requestStop() }
       let body = try await Models.request(client: connection.client, provider: kind,
         repository: repository, revision: revision, variant: variant, endpoint: endpoint)
+      let plan = try await connection.client.planPull(body)
+      diagnostic(
+        "disk peak bytes=\(plan.peakBytes); \(plan.resources?.summary ?? "Memory estimate unavailable.")"
+      )
       let created = try await connection.client.pull(body)
       print(created.id.uuidString)
       try await Models.awaitDownload(created.id, client: connection.client)

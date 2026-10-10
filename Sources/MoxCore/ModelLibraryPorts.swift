@@ -48,6 +48,7 @@ public protocol ModelFileSource: Sendable {
 }
 
 public protocol ResolvedModelSource: ModelFileSource {
+  func resourceConfiguration(_ manifest: ArtifactManifest) async throws -> Data?
   func resolve(registryID: UUID, repository: String, selector: String, variant: String) async throws
     -> ArtifactManifest
 }
@@ -56,4 +57,8 @@ public protocol ModelSourceFactory: Sendable {
   func deleteCredential(reference: String) throws
   func make(provider: ModelProvider, endpoint: URL, credentialReference: String?) throws
     -> any ResolvedModelSource
+}
+
+extension ResolvedModelSource {
+  public func resourceConfiguration(_ manifest: ArtifactManifest) async throws -> Data? { nil }
 }

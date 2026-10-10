@@ -22,7 +22,7 @@ func temporaryRoot() throws -> URL {
 func serviceModel() throws -> LocalModel {
   let root = try temporaryRoot()
   try Data(
-    #"{"model_type":"qwen2","hidden_size":16,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"max_position_embeddings":32768,"vocab_size":100}"#
+    #"{"model_type":"qwen2","hidden_size":16,"intermediate_size":64,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"max_position_embeddings":32768,"vocab_size":100}"#
       .utf8
   ).write(to: root.appendingPathComponent("config.json"))
   for name in ["tokenizer_config.json", "tokenizer.json"] {
@@ -894,9 +894,26 @@ private final class SaveFailureSwitch: @unchecked Sendable {
       return peer
     }.value
     defer { withExtendedLifetime(peer) {} }
-    try await Task.sleep(for: .seconds(7))
+    // Start the timeout assertion after preparation, rather than charging actor
+    // scheduling and metadata inspection against the socket write deadline.
+    let startDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    var observed: RequestState?
+    while ContinuousClock.now < startDeadline {
+      observed = try? await client.requestState(request.id)
+      if let state = observed,
+        state.terminal != nil || ["prefill", "decode"].contains(state.phase) { break }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    let started = try #require(observed)
+    #expect(started.terminal != nil || ["prefill", "decode"].contains(started.phase))
+    // Two seconds allow the backend barrier and delivery cleanup after the write deadline.
+    let stopDeadline = ContinuousClock.now.advanced(by: ServiceTiming.writeDeadline + .seconds(2))
+    while observed?.terminal == nil, ContinuousClock.now < stopDeadline {
+      try await Task.sleep(for: .milliseconds(20))
+      observed = try await client.requestState(request.id)
+    }
     #expect(await runtime.snapshot().activeLeases == 0)
-    #expect(try await client.requestState(request.id).terminal != nil)
+    #expect(observed?.terminal != nil)
     #expect(try await client.state().serviceState == "running")
   }
 }

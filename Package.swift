@@ -46,7 +46,7 @@ let package = Package(
     .testTarget(name: "MoxServiceTests", dependencies: ["MoxChat", "MoxServer", "MoxClient", "MoxPersistence", .product(name: "Hummingbird", package: "hummingbird")]),
     .testTarget(name: "MoxCoreTests", dependencies: ["MoxCore"]),
     .testTarget(name: "MoxSourcesTests", dependencies: ["MoxSources"]),
-    .testTarget(name: "MoxMLXTests", dependencies: ["MoxMLX", "MoxDomain"]),
+    .testTarget(name: "MoxMLXTests", dependencies: ["MoxMLX", "MoxDomain", "MoxBootstrap"]),
   ],
   swiftLanguageModes: [.v6]
 )

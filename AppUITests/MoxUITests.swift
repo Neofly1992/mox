@@ -23,6 +23,35 @@ final class MoxUITests: XCTestCase {
     navigation.click()
     XCTAssertTrue(app.textViews["composer"].waitForExistence(timeout: 10))
   }
+  @MainActor func testDoctorAndResourceAssessment() throws {
+    let app = XCUIApplication()
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "mox-doctor-ui-\(UUID())"
+    ).path
+    try seed(root)
+    app.launchEnvironment["MOX_DATA_ROOT"] = root
+    app.launch()
+    XCTAssertTrue(app.buttons["doctorNavigation"].waitForExistence(timeout: 20))
+    app.buttons["doctorNavigation"].click()
+    app.buttons["runDoctor"].click()
+    XCTAssertTrue(
+      app.descendants(matching: .any)["doctorResults"].firstMatch.waitForExistence(timeout: 30))
+    for check in ["package.identity", "environment.metal"] {
+      XCTAssertTrue(app.staticTexts["\(check) · 通过"].waitForExistence(timeout: 10))
+    }
+    let diagnosis = XCTAttachment(screenshot: app.screenshot())
+    diagnosis.name = "Doctor results"
+    diagnosis.lifetime = .keepAlways
+    add(diagnosis)
+    app.buttons["testingNavigation"].click()
+    XCTAssertTrue(app.staticTexts["resourceAssessment"].waitForExistence(timeout: 20))
+    let resources = XCTAttachment(screenshot: app.screenshot())
+    resources.name = "Resource assessment"
+    resources.lifetime = .keepAlways
+    add(resources)
+    app.typeKey("q", modifierFlags: .command)
+    XCTAssertTrue(app.wait(for: .notRunning, timeout: 30))
+  }
   @MainActor func testModelWorkspaceEntry() throws {
     let app = XCUIApplication()
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(

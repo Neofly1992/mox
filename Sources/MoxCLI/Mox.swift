@@ -27,7 +27,8 @@ import MoxProtocol
 
   static let configuration = CommandConfiguration(
     commandName: "mox", abstract: "Local MLX text inference",
-    version: "\(Wire.productVersion) \(Wire.buildID) (\(BuildInfo.configuration))", subcommands: [Chat.self, Serve.self, Models.self, API.self])
+    version: "\(Wire.productVersion) \(Wire.buildID) (\(BuildInfo.configuration))",
+    subcommands: [Doctor.self, Chat.self, Serve.self, Models.self, API.self])
 }
 struct Chat: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -84,7 +85,14 @@ struct Chat: AsyncParsableCommand {
       if let worker = connection.worker, !(await worker.wait()) { await worker.forceStop() }
       throw ExitCode(1)
     }
-    diagnostic("sampling max_tokens=\(effective.maxTokens) [\(effective.maxTokensSource.rawValue)] temperature=\(effective.temperature) [\(effective.temperatureSource.rawValue)] top_p=\(effective.topP) [\(effective.topPSource.rawValue)]")
+    do {
+      diagnostic(try await connection.client.assessResources(.init(model: modelReference, explicit: explicit)).summary)
+    } catch {
+      diagnostic("Memory preview unavailable; runtime admission remains required.")
+    }
+    diagnostic(
+      "sampling max_tokens=\(effective.maxTokens) [\(effective.maxTokensSource.rawValue)] temperature=\(effective.temperature) [\(effective.temperatureSource.rawValue)] top_p=\(effective.topP) [\(effective.topPSource.rawValue)]"
+    )
     let driver = await ChatDriver(
       client: connection.client, model: modelReference, sampling: try effective.sampling(), oneShot: prompt != nil)
     let status = await driver.run(prompt: prompt)

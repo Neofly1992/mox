@@ -1,10 +1,10 @@
 import Darwin
 import Foundation
 
-/// macOS VM accounting, sampled again before each GPU admission. Inactive pages
-/// are reclaimable; compressed/wired/active pages are deliberately not counted.
+/// Advisory free+inactive page observation, not total system availability or a
+/// process allocation limit. Compressed/wired/active pages are not counted.
 public enum SystemMemory {
-  public static func availableBytes() -> Int? {
+  public static func reclaimablePageBytes() -> Int? {
     let host = mach_host_self()
     defer { mach_port_deallocate(mach_task_self_, host) }
     var pageSize: vm_size_t = 0

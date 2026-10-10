@@ -8,9 +8,15 @@ import MoxDomain
 import OSLog
 
 public struct MLXBackend: RuntimeBackend {
+  private let configuredMemoryLimitBytes: Int
+  public var memoryBudgetCeilingBytes: Int? {
+    // Direct Core embedding cannot raise the native device/system safety ceiling.
+    min(configuredMemoryLimitBytes, (try? Self.recommendedBudget()) ?? 0)
+  }
   /// Composition creates one MLX backend per process. Limits are configured once,
   /// never changed by individual requests. Coordinator remains admission authority.
   public init(memoryLimit: Int) {
+    configuredMemoryLimitBytes = max(0, memoryLimit)
     Memory.memoryLimit = memoryLimit
     Memory.cacheLimit = 64 * 1024 * 1024
   }
@@ -23,6 +29,12 @@ public struct MLXBackend: RuntimeBackend {
     let budget = min(Double(physical) * 0.65, Double(device.recommendedMaxWorkingSetSize) * 0.8)
     return Int(budget)
   }
+  public func memorySnapshot() -> BackendMemorySnapshot? {
+    let sample = Memory.snapshot()
+    return .init(
+      activeBytes: sample.activeMemory, cacheBytes: sample.cacheMemory,
+      peakActiveBytes: sample.peakMemory)
+  }
   public func load(_ model: LocalModel) async throws -> any LoadedModel {
     var stage = BackendFailure.Stage.load
     do {
@@ -33,9 +45,13 @@ public struct MLXBackend: RuntimeBackend {
       try await container.perform { (context: ModelContext) in
         let input = try await context.processor.prepare(
           input: UserInput(prompt: .messages([["role": "user", "content": "Hi"]])))
+        guard input.text.tokens.size <= GenerationLimits.maximumInputTokens,
+          input.text.tokens.size + 1 <= model.contextSize else {
+          throw MoxError(.contextLimit, "Warmup template exceeds model context or input token allowance.")
+        }
         _ = try MLXLMCommon.generate(
           input: input,
-          parameters: GenerateParameters(maxTokens: 1, temperature: 0, prefillStepSize: 128),
+          parameters: GenerateParameters(maxTokens: 1, temperature: 0, prefillStepSize: ModelResources.prefillStepTokens),
           context: context, didGenerate: { (_: Int) in .more })
         Stream().synchronize()
       }
@@ -68,11 +84,15 @@ actor MLXLoadedModel: LoadedModel {
       throw MoxError(.unsupportedInput, "This model has no verified tool-call capability.")
     }
     let toolSpecs: [ToolSpec] = try request.tools.map { tool in
-      let parameters = try JSONDecoder().decode(JSONValue.self, from: Data(tool.parametersJSON.utf8))
-      return ["type": "function", "function": [
-        "name": tool.name, "description": tool.description ?? "",
-        "parameters": Self.nativeValue(parameters),
-      ] as [String: any Sendable]]
+      let parameters = try JSONDecoder().decode(
+        JSONValue.self, from: Data(tool.parametersJSON.utf8))
+      return [
+        "type": "function",
+        "function": [
+          "name": tool.name, "description": tool.description ?? "",
+          "parameters": Self.nativeValue(parameters),
+        ] as [String: any Sendable],
+      ]
     }
     let limit = contextSize
     return try await container.perform { (context: ModelContext) in
@@ -89,7 +109,7 @@ actor MLXLoadedModel: LoadedModel {
             tools: request.toolChoice == .auto ? toolSpecs : nil,
             additionalContext: toolCapable ? ["enable_thinking": false] : nil))
         let promptTokens = input.text.tokens.size
-        guard promptTokens <= 8192, promptTokens + request.sampling.maxTokens <= limit else {
+        guard promptTokens <= GenerationLimits.maximumInputTokens, promptTokens + request.sampling.maxTokens <= limit else {
           throw MoxError(
             .contextLimit,
             "Tokenized input plus requested output exceeds model context or the 8192-token input budget; history was not truncated."
@@ -108,8 +128,12 @@ actor MLXLoadedModel: LoadedModel {
         var emittedCalls = 0
         func emitCall(_ call: ToolCall) {
           guard request.tools.contains(where: { $0.name == call.function.name }),
-            let arguments = try? String(data: JSONEncoder().encode(call.function.arguments), encoding: .utf8)
-          else { decodingError = MoxError(.generationFailed, "Model produced an invalid tool call."); return }
+            let arguments = try? String(
+              data: JSONEncoder().encode(call.function.arguments), encoding: .utf8)
+          else {
+            decodingError = MoxError(.generationFailed, "Model produced an invalid tool call.")
+            return
+          }
           let id = "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
           if !output.emit(.toolCall(id: id, name: call.function.name, arguments: arguments)) {
             decodingError = MoxError(.slowConsumer, "Output consumer is too slow.")
@@ -152,7 +176,7 @@ actor MLXLoadedModel: LoadedModel {
           input: input,
           parameters: GenerateParameters(
             maxTokens: request.sampling.maxTokens, temperature: request.sampling.temperature,
-            topP: request.sampling.topP, prefillStepSize: 128),
+            topP: request.sampling.topP, prefillStepSize: ModelResources.prefillStepTokens),
           context: context,
           didGenerate: { (token: Int) in
             if output.isCancelled || Task.isCancelled { return .stop }

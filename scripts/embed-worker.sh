@@ -16,13 +16,13 @@ mkdir -p "$target_dir/MacOS" "$target_dir/Resources"
 cp "$source_dir/mox" "$target_dir/MacOS/mox"
 for bundle in "$source_dir"/*.bundle; do ditto "$bundle" "$target_dir/Resources/$(basename "$bundle")"; done
 ditto "$source_dir/licenses" "$target_dir/Resources/licenses"
-python3 - "$target_dir/Info.plist" "$SRCROOT/VERSION" <<'PYPLIST'
+python3 - "$target_dir/Info.plist" "$SRCROOT/VERSION" "$current_id" <<'PYPLIST'
 import plistlib,sys
 from pathlib import Path
 version=Path(sys.argv[2]).read_text().strip()
 with open(sys.argv[1],'wb') as output:
     plistlib.dump({'CFBundleIdentifier':'dev.mox.worker','CFBundleExecutable':'mox',
         'CFBundlePackageType':'APPL','CFBundleShortVersionString':version,
-        'CFBundleVersion':version,'LSBackgroundOnly':True},output)
+        'CFBundleVersion':version,'MoxBuildID':sys.argv[3],'LSBackgroundOnly':True},output)
 PYPLIST
 /usr/bin/codesign --force --sign - "$helpers/MoxWorker.app"

@@ -21,7 +21,7 @@ public final class ServiceClient: Sendable {
     request.cachePolicy = .reloadIgnoringLocalCacheData
     if path.contains("/cancel") {
       request.timeoutInterval = ServiceTiming.cancellationRequestTimeout
-    } else if path == "/downloads" || path == "/downloads/plan" || path.hasSuffix("/load") {
+    } else if path == "/downloads" || path == "/downloads/plan" || path == "/doctor/inspect" || path.hasSuffix("/load") {
       request.timeoutInterval = ServiceTiming.managementWorkTimeout
     } else { request.timeoutInterval = ServiceTiming.requestTimeout }
     return request
@@ -60,6 +60,41 @@ public final class ServiceClient: Sendable {
   }
   public func setDefaultRegistry(_ update: DefaultRegistryUpdate) async throws -> ModelConfiguration {
     try await json("/config/default", method: "POST", body: Wire.encode(update))
+  }
+  public func inspectModel(_ model: GenerateBody.Model) async throws -> DoctorResult {
+    try await inspectForDoctor(.init(model: model))
+  }
+  public func inspectSource(_ source: PullBody) async throws -> DoctorResult {
+    try await inspectForDoctor(.init(source: source))
+  }
+  private func inspectForDoctor(_ body: DoctorInspectionBody) async throws -> DoctorResult {
+    do {
+      let result: DoctorResult = try await withTaskCancellationHandler {
+        try await json("/doctor/inspect", method: "POST", body: Wire.encode(body))
+      } onCancel: {
+        Task { _ = try? await self.cancelDoctor(body.requestID) }
+      }
+      try Task.checkCancellation()
+      return result
+    } catch {
+      // Detached cleanup is not cancelled with the caller. A failure to acknowledge
+      // stop is reported as unknown; client disconnection is never called release.
+      if Task.isCancelled {
+        let acknowledged = await Task.detached { try? await self.cancelDoctor(body.requestID) }
+          .value
+        guard acknowledged?.status == .cancelled else {
+          throw MoxError(.connectionLost, "Diagnostic check cancellation could not be confirmed.")
+        }
+        throw CancellationError()
+      }
+      throw error
+    }
+  }
+  private func cancelDoctor(_ id: UUID) async throws -> DoctorResult {
+    try await json("/doctor/\(id)/cancel", method: "POST")
+  }
+  public func assessResources(_ body: SamplingResolutionBody) async throws -> ResourceAssessment {
+    try await json("/resources", method: "POST", body: Wire.encode(body))
   }
   public func resolveSampling(_ body: SamplingResolutionBody) async throws -> EffectiveSampling {
     try await json("/config/effective", method: "POST", body: Wire.encode(body))

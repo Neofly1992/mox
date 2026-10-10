@@ -1,12 +1,16 @@
 import Foundation
+import MoxCore
 import MoxDomain
 import Testing
+
 @testable import MoxSources
 
 @Test func credentialsUseExactOrigin() throws {
   let origin = URL(string: "https://example.com")!
   #expect(SourceRedirectPolicy.sameOrigin(origin, URL(string: "https://example.com:443/file")))
-  for target in ["https://other.example/file", "http://example.com/file", "https://example.com:444/file"] {
+  for target in [
+    "https://other.example/file", "http://example.com/file", "https://example.com:444/file",
+  ] {
     #expect(!SourceRedirectPolicy.sameOrigin(origin, URL(string: target)))
   }
 }
@@ -42,6 +46,12 @@ func realModelScopeResolvesFixedSnapshotAndVerifiesConfig() async throws {
   let source = try ModelScopeSource()
   let manifest = try await source.resolve(registryID: UUID(), repository: "mlx-community/Qwen2.5-0.5B-Instruct-4bit", selector: "master")
   #expect(manifest.origin.revision.count == 40)
+  let metadata = try #require(try await source.resourceConfiguration(manifest))
+  let weights = manifest.files.filter { $0.path.hasSuffix(".safetensors") }.reduce(Int64(0)) {
+    $0 + $1.bytes
+  }
+  let resources = try ModelResources(configuration: metadata, weightBytes: Int(weights))
+  #expect(resources.assessment(maxTokens: 8, budgetBytes: Int.max).status == .recommended)
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
@@ -57,6 +67,12 @@ func realHuggingFaceResolvesFixedSnapshot() async throws {
   let source = try HuggingFaceSource(cacheDirectory: root)
   let manifest = try await source.resolve(registryID: UUID(), repository: "mlx-community/Qwen2.5-0.5B-Instruct-4bit", selector: "main")
   #expect(manifest.origin.revision.count == 40)
+  let metadata = try #require(try await source.resourceConfiguration(manifest))
+  let weights = manifest.files.filter { $0.path.hasSuffix(".safetensors") }.reduce(Int64(0)) {
+    $0 + $1.bytes
+  }
+  let resources = try ModelResources(configuration: metadata, weightBytes: Int(weights))
+  #expect(resources.assessment(maxTokens: 8, budgetBytes: Int.max).status == .recommended)
   #expect(manifest.files.contains { $0.path == "model.safetensors" })
   let staging = root.appendingPathComponent("staging")
   try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
@@ -98,7 +114,9 @@ func realHuggingFaceResolvesFixedSnapshot() async throws {
   #expect(!ModelAssetSelection.includes("8bit/model.safetensors", variant: "4bit"))
   #expect(!ModelAssetSelection.includes("4bit/nested/model.safetensors", variant: "4bit"))
   let hash = ArtifactDigest.sha256(String(repeating: "a", count: 64))
-  let files = ["4bit/config.json", "4bit/tokenizer.json", "4bit/tokenizer_config.json",
-    "4bit/model.safetensors"].map { ArtifactFile(path: $0, bytes: 1, digest: hash) }
+  let files = [
+    "4bit/config.json", "4bit/tokenizer.json", "4bit/tokenizer_config.json",
+    "4bit/model.safetensors",
+  ].map { ArtifactFile(path: $0, bytes: 1, digest: hash) }
   try ModelAssetSelection.validate(files, variant: "4bit")
 }

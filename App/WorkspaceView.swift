@@ -11,11 +11,14 @@ struct WorkspaceView: View {
     case testing = "测试"
     case downloads = "下载任务"
     case api = "本机 API"
+    case doctor = "环境诊断"
     var id: Self { self }
     var symbol: String {
       self == .models
         ? "square.stack.3d.up"
-        : self == .downloads ? "arrow.down.circle" : self == .api ? "network" : "flask"
+        : self == .doctor
+          ? "stethoscope"
+          : self == .downloads ? "arrow.down.circle" : self == .api ? "network" : "flask"
     }
   }
   @Bindable var chat: ChatController
@@ -49,7 +52,9 @@ struct WorkspaceView: View {
             item == .models
               ? "modelsNavigation"
               : item == .downloads
-                ? "downloadsNavigation" : item == .api ? "apiNavigation" : "testingNavigation")
+                ? "downloadsNavigation"
+                : item == .api
+                  ? "apiNavigation" : item == .doctor ? "doctorNavigation" : "testingNavigation")
         }
         Spacer(minLength: 0)
       }.padding(8)
@@ -63,6 +68,7 @@ struct WorkspaceView: View {
       case .testing: ChatView(chat: chat, chooseModel: chooseModel)
       case .downloads: downloads
       case .api: PublicAPIView(chat: chat)
+      case .doctor: DoctorView(chat: chat)
       }
     }
     .task {
@@ -153,8 +159,12 @@ struct WorkspaceView: View {
           }
         }
         GroupBox("运行") {
-          Text(runtimeLabel(path))
-            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+          VStack(alignment: .leading, spacing: 8) {
+            Text(runtimeLabel(path))
+            ResourcePreview(
+              chat: chat, model: .init(kind: "localDirectory", path: path), explicit: .init())
+          }
+          .frame(maxWidth: .infinity, alignment: .leading).padding(8)
         }
         Button("测试此模型") {
           Task {
@@ -598,7 +608,8 @@ private struct AcquireModelSheet: View {
           } else {
             Text("当前可用空间未知；开始时仍会尝试系统容量检查。")
           }
-          Text("文件布局通过初检；模型架构与权重需在下载后最终验证。")
+          Text(plan.resources.map { "\($0.status.userLabel) · \($0.summary)" } ?? "无法可靠估算内存；下载后仍需运行准入。")
+          Text("内存评估不禁止保存模型；文件布局、架构与权重需在下载后最终验证。")
         }.font(.caption)
       } else {
         Text("先检查来源、精确版本和空间估算，再开始下载。")

@@ -24,6 +24,8 @@ GitHub 手动工作流要先存在于默认分支；开发阶段通过上述分�
 5. 用户从该 Draft 下载实际附件，按下节在同一份解压产物完成真实 MLX 与 GUI 验收。验收失败继续保留 Draft；需要改代码时用新版本标签，不移动旧标签。
 6. 用户记录所验附件名、SHA-256、commit、环境和结果，明确批准后才通过 GitHub UI 手动公开（保留实验包/未公证说明及必要限制）。上传期间禁止手动公开；GitHub 没有将“仍为 Draft”条件与附件上传原子绑定的 API。工作流不代填人工结论，不执行 publish。
 
+发布附件使用独立的 `.build/release-assets` 空目录，不得使用会与 `.build/Release` 在默认 macOS 文件系统上重合的 `.build/release`。工作流显式传入输出目录，因此可从原有不可变版本标签重建；上传仍严格拒绝三个附件以外的文件。
+
 每个 ZIP 只有 `Mox.app`，包含嵌入 worker、官方 Metal library、依赖 bundles 和许可证。没有单独发布裸 CLI；CLI 可从 `Mox.app/Contents/Helpers/MoxWorker.app/Contents/MacOS/mox` 使用，必须携带完整 App。SHA-256 文件验证 ZIP，JSON 记录版本、commit、源码身份、签名状态及 run/attempt。仅打包 App，不打包整个 `.build`、权重、用户库、凭据、fixtures、符号或内部过程材料。
 
 ## 下载与验收同一份附件

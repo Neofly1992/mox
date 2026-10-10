@@ -51,9 +51,9 @@ jobs:
         with:
           artifact-ids: ${{ needs.build.outputs.artifact_id }}
           merge-multiple: true
-          path: .build/release
+          path: .build/release-assets
       - name: Upload only to a matching Draft
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
-        run: python3 scripts/upload-draft-release.py --tag "$RELEASE_TAG" --directory .build/release
+        run: python3 scripts/upload-draft-release.py --tag "$RELEASE_TAG" --directory .build/release-assets

@@ -61,11 +61,24 @@ def validate_app(app, version, identity):
                 and path.name not in {'.env', 'HANDOFF.md', 'discovery.json'}, f'Forbidden payload: {path}')
 
 
+def validate_output_directory(output):
+    # APFS is commonly case-insensitive; release must never alias Release.
+    normalized = str(output.resolve()).casefold()
+    for configuration in ('Release', 'Debug'):
+        build = str((ROOT / '.build' / configuration).resolve()).casefold()
+        require(normalized != build and not normalized.startswith(build + '/'),
+                'Package output must be separate from build products')
+    require(not output.exists() or (output.is_dir() and not any(output.iterdir())),
+            'Package output must be an empty directory')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tag', help='Existing vVERSION tag; omit only for branch build verification')
-    parser.add_argument('--output', default='.build/release')
+    parser.add_argument('--output', default='.build/release-assets')
     args = parser.parse_args()
+    output = Path(args.output).resolve()
+    validate_output_directory(output)
     version = (ROOT / 'VERSION').read_text().strip()
     require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'Invalid VERSION')
     commit = run('git', 'rev-parse', 'HEAD')
@@ -75,7 +88,6 @@ def main():
     identity = run('python3', str(ROOT / 'scripts/stamp-build.py'), '--check')
     app = ROOT / '.build/Release/Mox.app'
     validate_app(app, version, identity)
-    output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     run_id = os.environ.get('GITHUB_RUN_ID', 'local')
     attempt = os.environ.get('GITHUB_RUN_ATTEMPT', '1')

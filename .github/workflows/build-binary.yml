@@ -48,12 +48,12 @@ jobs:
         run: |
           args=()
           if [[ -n "$RELEASE_TAG" ]]; then args+=(--tag "$RELEASE_TAG"); fi
-          python3 scripts/package-release.py "${args[@]}"
+          python3 scripts/package-release.py --output .build/release-assets "${args[@]}"
           git diff --exit-code -- Package.resolved Sources/MoxProtocol/BuildIdentity.swift Mox.xcodeproj/project.pbxproj
       - uses: actions/upload-artifact@v4
         id: upload
         with:
           name: ${{ inputs.artifact }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .build/release/*
+          path: .build/release-assets/*
           if-no-files-found: error
           retention-days: 14

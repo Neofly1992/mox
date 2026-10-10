@@ -13,6 +13,29 @@ draft = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(draft)
 
 
+package_spec = importlib.util.spec_from_file_location('package', Path(__file__).with_name('package-release.py'))
+package = importlib.util.module_from_spec(package_spec)
+package_spec.loader.exec_module(package)
+
+
+class PackageDirectoryTests(unittest.TestCase):
+    def test_build_directories_are_rejected_case_insensitively(self):
+        for name in ('Release', 'release', 'RELEASE', 'Debug', 'debug/nested'):
+            with self.subTest(name=name), self.assertRaisesRegex(SystemExit, 'separate'):
+                package.validate_output_directory(package.ROOT / '.build' / name)
+
+    def test_only_fresh_or_empty_output_is_accepted(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / 'release-assets'
+            package.validate_output_directory(output)
+            output.mkdir()
+            package.validate_output_directory(output)
+            (output / 'unexpected.txt').write_text('preserve this file')
+            with self.assertRaisesRegex(SystemExit, 'empty directory'):
+                package.validate_output_directory(output)
+            self.assertEqual((output / 'unexpected.txt').read_text(), 'preserve this file')
+
+
 class FakeGitHub:
     def __init__(self, *, public=False, missing=False, moved=False, conflict=False):
         self.commit = 'a' * 40

@@ -1,6 +1,6 @@
 # 验证范围与限制
 
-Mox 0.1.0 是源码原型。自动测试、独立代码复核和用户体验验收是不同环节，不能相互替代。可复跑命令、环境准备和测试隔离要求见 [开发与测试](DEVELOPMENT.md)。具体提交的自动检查结果见 [GitHub Actions](https://github.com/Neofly1992/mox/actions)。
+Mox 0.1.1 是源码原型。自动测试、独立代码复核和用户体验验收是不同环节，不能相互替代。可复跑命令、环境准备和测试隔离要求见 [开发与测试](DEVELOPMENT.md)。具体提交的自动检查结果见 [GitHub Actions](https://github.com/Neofly1992/mox/actions)。
 
 ## 已覆盖的验证层
 

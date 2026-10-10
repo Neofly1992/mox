@@ -1,6 +1,6 @@
 # 二进制 Draft Release 与人工发布
 
-Mox 0.1.0 是 Apple Silicon 源码原型。发布工作流提供完整 App ZIP，明确为 **ad hoc 签名、未公证的实验包**；没有 Developer ID 身份，不是正式签名安装包，不含模型。macOS 15 是部署目标，尚无 macOS 15 真机验收结论。
+Mox 0.1.1 是 Apple Silicon 源码原型。发布工作流提供完整 App ZIP，明确为 **ad hoc 签名、未公证的实验包**；没有 Developer ID 身份，不是正式签名安装包，不含模型。macOS 15 是部署目标，尚无 macOS 15 真机验收结论。
 
 ## 工作流与权限
 
@@ -18,7 +18,7 @@ GitHub 手动工作流要先存在于默认分支；开发阶段通过上述分�
 提交、推送开发分支、合并 main、创建标签、创建 Draft、公开发布是独立动作，分别获得用户授权。
 
 1. 审查源码与工作流、远端完整构建结果和验证边界；批准后合并默认分支，检查合并提交。必要时先手动运行 `Binary build verification`。
-2. 确认 `VERSION` 与预期版本一致，在审查过的提交创建并推送 `v0.1.0`（版本变化时以 VERSION 为准）。工作流不创建、移动或替换标签。
+2. 确认 `VERSION` 与预期版本一致，在审查过的提交创建并推送 `v0.1.1`（版本变化时以 VERSION 为准）。工作流不创建、移动或替换标签。
 3. 用户批准后配置 environment 保护；运行 `Draft binary release`，选择默认分支，填写精确标签并勾选 ad hoc 确认。checkout 使用完整 `refs/tags/...`，HEAD 必须等于标签 commit，标签必须精确等于 `v` + VERSION；锁文件/源码身份变化时失败。
 4. 查看成功运行和 Draft 的附件。上传前再次确认远端标签 commit。现有公开 Release 或没有匹配 commit/signing 标记的 Draft 一律拒绝，不修改正文、删除或覆盖附件。构建 artifact 也按 run ID/attempt 唯一命名，上传任务按成功构建返回的不可变 artifact ID 下载；只重跑失败的上传任务时仍使用原构建，重跑全部时获得新构建。仅重跑上传可续传未上传的附件，已存在且 GitHub SHA-256 digest/大小一致的附件跳过。若 502 留下 `starter` 空附件，或同名附件内容不同/缺少 digest，脚本保留附件并失败；此时必须选择 **Re-run all jobs** 或重新手动触发整个工作流，重新构建产生新 run/attempt 附件名。**Re-run failed jobs** 复用原 artifact，不能解除同名冲突。选择一个完整成功 attempt 的 ZIP、校验文件与 JSON，保留其他附件作为证据。
 5. 用户从该 Draft 下载实际附件，按下节在同一份解压产物完成真实 MLX 与 GUI 验收。验收失败继续保留 Draft；需要改代码时用新版本标签，不移动旧标签。
@@ -31,8 +31,8 @@ GitHub 手动工作流要先存在于默认分支；开发阶段通过上述分�
 Draft 仅有授权仓库用户可见；公开后普通用户可从 [Releases](https://github.com/Neofly1992/mox/releases) 下载。在下载目录执行（以实际文件名替换）：
 
 ```sh
-shasum -a 256 -c Mox-v0.1.0-macos-arm64-adhoc-RUN-ATTEMPT.sha256
-ditto -x -k Mox-v0.1.0-macos-arm64-adhoc-RUN-ATTEMPT.zip "$HOME/Downloads/Mox acceptance"
+shasum -a 256 -c Mox-v0.1.1-macos-arm64-adhoc-RUN-ATTEMPT.sha256
+ditto -x -k Mox-v0.1.1-macos-arm64-adhoc-RUN-ATTEMPT.zip "$HOME/Downloads/Mox acceptance"
 "$HOME/Downloads/Mox acceptance/Mox.app/Contents/Helpers/MoxWorker.app/Contents/MacOS/mox" --version
 ```
 

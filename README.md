@@ -2,7 +2,7 @@
 
 Mox 是面向 Apple Silicon 的本地语言模型工作台。原生 macOS App、CLI 和本地 HTTP API 共用同一模型库和 MLX 推理服务。
 
-**当前版本：0.1.0，源码原型。** 本仓库提供源码、本地构建与 GitHub Draft 二进制工作流；实验 App 为 ad hoc 签名、未公证，尚无正式签名安装包；人工体验验收及 macOS 15 真机验证仍待完成。自动测试与独立复核的范围见[验证记录](docs/VALIDATION.md)。
+**当前版本：0.1.1，源码原型。** 本仓库提供源码、本地构建与 GitHub Draft 二进制工作流；实验 App 为 ad hoc 签名、未公证，尚无正式签名安装包；人工体验验收及 macOS 15 真机验证仍待完成。自动测试与独立复核的范围见[验证记录](docs/VALIDATION.md)。
 
 ## 功能与限制
 
